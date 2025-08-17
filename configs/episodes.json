@@ -2,8 +2,10 @@
   "universe": "SP500",
   "notes": {
     "date_format": "YYYY-MM-DD",
+    "start_date": "2000-03-20",
+    "end_date": "2025-08-11",
     "episode_is_one_training_unit": true,
-    "comment": "Use time-based 80–20 split inside each non-test episode. Hold test out completely."
+    "comment": "All episodes except the last one are used for training and validation, while the last one is reserved for testing."
   },
   "episodes": [
     {
