@@ -2,7 +2,7 @@
   "universe": "SP500",
   "notes": {
     "date_format": "YYYY-MM-DD",
-    "start_date": "2000-03-20",
+    "start_date": "2000-02-20",
     "end_date": "2025-08-11",
     "episode_is_one_training_unit": true,
     "comment": "All episodes except the last one are used for training and validation, while the last one is reserved for testing."
