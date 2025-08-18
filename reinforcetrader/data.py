@@ -45,12 +45,31 @@ class RawDataLoader:
     
         return tickers
 
+    def _clean_hist_prices(self, data: pd.DataFrame) -> pd.DataFrame:
+        # Try forward forward fill to fill any missing values in between
+        data = data.ffill()
+
+        # Find all tickers that don't have data from start_date
+        tickers_with_nan = data.T.groupby(level=0).apply(lambda x: x.T.isna().any().any())
+        tickers_to_drop = tickers_with_nan[tickers_with_nan].index
+
+        # Drop all tickers that have NaN values
+        data = data.drop(columns=tickers_to_drop, level=0)
+        columns_left = data.columns.get_level_values('Ticker').nunique()
+        print(f'Dropped {len(tickers_to_drop)} tickers. {columns_left} tickers left.')
+
+        return data 
+
+
     def _download_hist_prices(self, tickers: list, save: bool, save_path=None) -> pd.DataFrame:
         # Download data from yfinance
         data = yf.download(tickers=tickers, start=self._start_date, end=self._end_date, auto_adjust=True)
 
         # Reorder multi-column index to ['Ticker', 'Price']
         data = data.reorder_levels(['Ticker', 'Price'], axis=1)
+
+        # Perform data-cleaning
+        data = self._clean_hist_prices(data)
 
         # Save the data locally to reduce API calls
         if save:
