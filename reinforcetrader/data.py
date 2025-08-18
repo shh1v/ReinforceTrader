@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import json
+
 from pathlib import Path
 import yfinance as yf
 
@@ -16,25 +16,6 @@ class RawDataLoader:
 
         # Load all the ticker price and volume data
         self._hist_data = self._load_hist_prices(tickers)
-
-    
-    def _load_config(self, config_path: str) -> dict:
-        try:
-            path = Path(config_path)
-            if not path.exists():
-                raise FileNotFoundError(f"Config file not found: {config_path}")
-            if not path.is_file():
-                raise ValueError(f"Config path is not a file: {config_path}")
-
-            with path.open("r", encoding="utf-8") as f:
-                config = json.load(f)
-
-            return config
-
-        except json.JSONDecodeError:
-            raise ValueError(f"Invalid JSON format in {config_path}")
-        except Exception as e:
-            raise RuntimeError(f"Error loading config: {e}")
             
     def _fetch_tickers(self) -> list:
         # Fetch the S&P 500 tickers list from wikipedia
