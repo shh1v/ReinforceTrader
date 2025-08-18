@@ -107,5 +107,8 @@ class FeatureBuilder:
         if save:
             self._save_features_data()
 
-    def get_features(self):
+    def get_features(self) -> pd.DataFrame:
+        if self._features_data is None:
+            return pd.DataFrame()
+        
         return self._features_data
