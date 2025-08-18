@@ -15,14 +15,17 @@ class FeatureBuilder:
         self._hist_prices = hist_prices.sort_index()
         self._features_data = None
 
+    def _clean_raw_data(self):
+        pass
 
     def build_features(self):
         # Get tickers symbols
         tickers = self._hist_prices.columns.get_level_values('Ticker').unique()
 
         # Predefine feature names and dataframe
-        technical_features = ['Close', 'C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
-        feature_columns = pd.MultiIndex.from_product([tickers, technical_features],
+        price_features = ['Close', 'Body/HL', 'UShadow/HL', 'LShadow/HL']
+        technical_features = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
+        feature_columns = pd.MultiIndex.from_product([tickers, price_features + technical_features],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._hist_prices.index, columns=feature_columns, dtype=float)
 
@@ -36,6 +39,22 @@ class FeatureBuilder:
             # Keep close price as is (may not be part of state representation)
             self._features_data.loc[:, (ticker, 'Close')] = close
 
+            # Compute the candle body features
+            # Body relative to total range, clip for stability
+            candle_range = (high - low).replace(0, 1e-12)
+            self._features_data.loc[:, (ticker, 'Body/HL')] = (
+                (close - open) / candle_range
+            ).clip(-1, 1)
+
+            # Upper shadow relative to range
+            self._features_data.loc[:, (ticker, 'UShadow/HL')] = (
+                    (high - np.maximum(open, close)) / candle_range
+            ).clip(lower=0)
+
+            # Lower shadow relative to range
+            self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
+                (np.minimum(open, close) - low) / candle_range
+            ).clip(lower=0)
 
             # Compute rolling Exponential Moving Averages: 5, 13, 26
             ema5 = EMAIndicator(close=close, window=5).ema_indicator()
@@ -63,6 +82,10 @@ class FeatureBuilder:
             # Compute Average Directional Index scaled bw [0, 1]
             adx = ADXIndicator(high=high, low=low, close=close, window=14).adx()
             self._features_data.loc[:, (ticker, 'ADX')] = adx / 100.0
+
+            # Compute ratio of current volume over 20 volume moving average
+            vol20 = volume.rolling(20, min_periods=20).mean()
+            self._features_data.loc[:, (ticker, 'V/Vol20')] = volume / vol20
 
     def get_features(self):
         return self._features_data
