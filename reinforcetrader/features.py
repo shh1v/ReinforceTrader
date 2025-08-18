@@ -2,23 +2,36 @@ import numpy as np
 import pandas as pd
 
 from tqdm import tqdm
+from pathlib import Path
 from ta.trend import EMAIndicator, ADXIndicator
 from ta.volatility import BollingerBands
 from ta.momentum import RSIIndicator
 
 class FeatureBuilder:
     def __init__(self, hist_prices):
-        """
-        hist_prices: DataFrame with MultiIndex columns ['Ticker','Price']
-                     where Price ∈ ['Open','High','Low','Close','Volume']
-        """
         self._hist_prices = hist_prices.sort_index()
         self._features_data = None
 
-    def _clean_raw_data(self):
-        pass
+    def _save_features_data(self, save_dir='data/processed') -> bool:
+        if self._features_data is None or self._features_data.empty:
+            print('Features data not built or empty')
+            return False
+        
+        # Build save directory and file path
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        dates = self._features_data.index
+        start_date = dates[0].strftime('%Y-%m-%d')
+        end_date = dates[-1].strftime('%Y-%m-%d')
+        file_path = save_dir / f"tickers_features_{start_date}_{end_date}.csv"
 
-    def build_features(self):
+        # Save the features data
+        self._features_data.to_csv(file_path)
+        print(f"Features data saved to {file_path}")
+
+        return True
+
+    def build_features(self, save=True):
         # Get tickers symbols
         tickers = self._hist_prices.columns.get_level_values('Ticker').unique()
 
@@ -86,6 +99,13 @@ class FeatureBuilder:
             # Compute ratio of current volume over 20 volume moving average
             vol20 = volume.rolling(20, min_periods=20).mean()
             self._features_data.loc[:, (ticker, 'V/Vol20')] = volume / vol20
+        
+        # Drop all rows with NaN values
+        self._features_data = self._features_data.dropna()
+
+        # Save the features data to use for later
+        if save:
+            self._save_features_data()
 
     def get_features(self):
         return self._features_data
