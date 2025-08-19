@@ -9,7 +9,7 @@
   "episodes": [
     {
       "episode_id": 1,
-      "type": "training",
+      "type": "train",
       "name": "Dot-com bust",
       "regime": "bear",
       "start_date": "2000-03-20",
@@ -18,7 +18,7 @@
     },
     {
       "episode_id": 2,
-      "type": "training",
+      "type": "train",
       "name": "Post-bust base",
       "regime": "sideways",
       "start_date": "2002-07-23",
@@ -27,7 +27,7 @@
     },
     {
       "episode_id": 3,
-      "type": "training",
+      "type": "train",
       "name": "Credit and housing expansion",
       "regime": "bull",
       "start_date": "2003-05-28",
@@ -36,7 +36,7 @@
     },
     {
       "episode_id": 4,
-      "type": "training",
+      "type": "train",
       "name": "Global Financial Crisis",
       "regime": "bear",
       "start_date": "2007-10-09",
@@ -45,7 +45,7 @@
     },
     {
       "episode_id": 5,
-      "type": "training",
+      "type": "train",
       "name": "Post-GFC recovery",
       "regime": "bull",
       "start_date": "2009-03-03",
@@ -54,7 +54,7 @@
     },
     {
       "episode_id": 6,
-      "type": "training",
+      "type": "train",
       "name": "QE exit and global growth scare",
       "regime": "sideways",
       "start_date": "2014-10-14",
@@ -63,7 +63,7 @@
     },
     {
       "episode_id": 7,
-      "type": "training",
+      "type": "train",
       "name": "Policy-fueled expansion",
       "regime": "bull",
       "start_date": "2016-11-15",
@@ -72,7 +72,7 @@
     },
     {
       "episode_id": 1,
-      "type": "testing",
+      "type": "test",
       "name": "Mixed: COVID shock, rebound, inflation tightening",
       "regime": "mixed",
       "start_date": "2019-12-10",
