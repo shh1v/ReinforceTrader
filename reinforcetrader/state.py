@@ -108,3 +108,25 @@ class EpisodeStateLoader:
             state_matrix = np.vstack([pad_block, window_block])
 
         return state_matrix
+    
+    def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker, index: int):
+        # Get the respective feature data for the episode type
+        match episode_type:
+            case 'train':
+                episode_features = self._train_features
+            case 'validate':
+                episode_features = self._val_features
+            case 'test':
+                episode_features = self._test_features
+            case _:
+                raise ValueError(f"Invalid episode type: {episode_type}")
+
+        episode_ticker_features = episode_features[(episode_id, ticker)]
+
+        # Check if index is in episode bounds
+        T = episode_ticker_features.shape[0]
+        if index < 0 or index >= T:
+            raise IndexError(f"Index {index} out of range [0, {T-1}]")
+
+        # Slice features (skip first 5 columns)
+        return episode_ticker_features[index, :5]
