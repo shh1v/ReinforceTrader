@@ -35,10 +35,13 @@ class FeatureBuilder:
         # Get tickers symbols
         tickers = self._hist_prices.columns.get_level_values('Ticker').unique()
 
-        # Predefine feature names and dataframe
-        price_features = ['Close', 'Body/HL', 'UShadow/HL', 'LShadow/HL']
-        technical_features = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
-        feature_columns = pd.MultiIndex.from_product([tickers, price_features + technical_features],
+        # Predefine feature names
+        OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
+        price_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL']
+        technical_f = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
+
+        # Predefine the feature dataframe
+        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + price_f + technical_f],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._hist_prices.index, columns=feature_columns, dtype=float)
 
@@ -49,8 +52,12 @@ class FeatureBuilder:
             close = self._hist_prices[ticker]['Close']
             volume = self._hist_prices[ticker]['Volume']
 
-            # Keep close price as is (may not be part of state representation)
+            # Keep OHLCV as is (may not be part of state representation)
+            self._features_data.loc[:, (ticker, 'Open')] = open
+            self._features_data.loc[:, (ticker, 'High')] = high
+            self._features_data.loc[:, (ticker, 'Low')] = low
             self._features_data.loc[:, (ticker, 'Close')] = close
+            self._features_data.loc[:, (ticker, 'Volume')] = volume
 
             # Compute the candle body features
             # Body relative to total range, clip for stability
@@ -107,5 +114,8 @@ class FeatureBuilder:
         if save:
             self._save_features_data()
 
-    def get_features(self):
+    def get_features(self) -> pd.DataFrame:
+        if self._features_data is None:
+            return pd.DataFrame()
+        
         return self._features_data

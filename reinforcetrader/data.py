@@ -74,9 +74,9 @@ class RawDataLoader:
         print(f'Downloading from yfinance as cached data does not exist in {cache_path}')
         return self._download_hist_prices(tickers, save=True, save_path=file_path)
 
-    def get_hist_prices(self, selected_columns: list=[]):
+    def get_hist_prices(self, tickers: list=[]):
         # Only return selected columns
-        if selected_columns:
-            return self._hist_data[selected_columns]
+        if tickers:
+            return self._hist_data[tickers]
         
         return self._hist_data
