@@ -110,3 +110,32 @@ class RLAgent:
         # Pick action from DQN 1-epsilon times
         q_values = self.get_q_values(state_matrix)
         return int(np.argmax(q_values))
+
+    def exp_replay(self, batch_size):
+        losses = []
+        
+        # Define mini-batch which holds batch_size most recent states from memory
+        mini_batch = []
+        for i in range(len(self._memory) - batch_size + 1, len(self._memory)):
+            mini_batch.append(self._memory[i])
+            
+        for state, action, reward, next_state, done in mini_batch:
+            if done:
+                # special condition for last training epoch in batch (no next_state)
+                optimal_q_for_action = reward  
+            else:
+                # target Q-value is updated using the Bellman equation: reward + gamma * max(predicted Q-value of next state)
+                optimal_q_for_action = reward + self._gamma * np.max(self.get_q_values(next_state))
+                
+            # Get the predicted Q-values of the current state
+            q_table = self.get_q_values(state)
+            # Update the output Q table - replace the predicted Q value for action with the target Q value for action 
+            q_table[0][action] = optimal_q_for_action
+            # Fit the model where state is X and target_q_table is Y
+            history = self.fit_model(state, q_table)
+            losses += history.history['loss']
+           
+        # define epsilon decay (for the act function)
+        if self.epsilon > self._epsilon_min:
+            self.epsilon *= self._epsilon_decay
+        return losses
