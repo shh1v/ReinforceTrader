@@ -1,3 +1,4 @@
+import numpy as np
 import keras
 
 from keras import Input, layers, optimizers
@@ -33,7 +34,6 @@ class DualBranchDQN(keras.Model):
     def get_model(self):
         return self._model
 
-
 class RLAgent:
     def __init__(self, window_size: int, num_features: tuple[int, int], test_mode: int=False, model_name: str=''):
         # Store state and action representation configurations
@@ -57,8 +57,11 @@ class RLAgent:
         self._epsilon_decay = 0.995
 
         # Load model or define new
-        self._model = keras.models.load_model.load(model_name) if self._test_mode else self._init_model()
+        self._model = keras.models.load_model(model_name) if self._test_mode else self._init_model()
     
+    def get_model(self):
+        return self._model
+
     def _init_model(self) -> keras.Model:
         # Compute state shapes for the model
         motif_shape = (self._window_size, self._num_motif_feat)
@@ -68,3 +71,42 @@ class RLAgent:
         dual_dqn = DualBranchDQN(motif_shape, context_size, self._action_size)
 
         return dual_dqn.get_model()
+
+    def _get_states(self, state_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        # Check the state matrix shape is correct
+        total_features = self._num_motif_feat + self._num_context_feat
+        if state_matrix.shape != (self._window_size, total_features):
+            raise KeyError(f'Invalid state matrix shape: {state_matrix.shape}')
+        
+        # Define the motif input
+        # Expand dims from [window, num_features] to [batch_size=1, window, num_features]
+        motif_input = np.expand_dims(state_matrix[:, :self._num_motif_feat], axis=0).astype(np.float32)
+
+        # Flatted the context input to [1, window * num_context_features]
+        context_input = state_matrix[:, self._num_motif_feat:].reshape(1, -1).astype(np.float32)
+
+        return motif_input, context_input
+    
+    def get_q_values(self, state_matrix: np.ndarray) -> np.ndarray:
+        # Predict q values through DQN
+        motif_input, context_input = self._get_states(state_matrix)
+        q_values = self._model.predict(x=[motif_input, context_input], verbose=0)
+
+        return q_values
+    
+    def fit_model(self, state_matrix: np.ndarray, target_q: np.ndarray):
+        # Compute MSE loss between actual and target q values
+        motif_input, context_input = self._get_states(state_matrix)
+        loss = self._model.fit([motif_input, context_input], target_q, epochs=1, verbose=0)    
+
+        return loss
+
+    def act(self, state_matrix: np.ndarray) -> int:
+        # Defines an epsilon-greedy behaviour policy
+        # Pick random action epsilon times
+        if not self._test_mode and np.random.random() < self._epsilon:
+            return np.random.randint(self._action_size)
+
+        # Pick action from DQN 1-epsilon times
+        q_values = self.get_q_values(state_matrix)
+        return int(np.argmax(q_values))
