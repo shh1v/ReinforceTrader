@@ -3,6 +3,9 @@ import keras
 
 from keras import Input, layers, optimizers
 from collections import deque
+from tqdm import tqdm
+
+from state import EpisodeStateLoader
 
 @keras.saving.register_keras_serializable()
 # Define DQN Model Architecture
@@ -111,31 +114,116 @@ class RLAgent:
         q_values = self.get_q_values(state_matrix)
         return int(np.argmax(q_values))
 
-    def exp_replay(self, batch_size):
+    def exp_replay(self, batch_size: int):
+        if len(self._memory) < batch_size:
+            return []
+
+        # take the last batch_size items
+        mini_batch = [self._memory[i] for i in range(len(self._memory) - batch_size, len(self._memory))]
         losses = []
-        
-        # Define mini-batch which holds batch_size most recent states from memory
-        mini_batch = []
-        for i in range(len(self._memory) - batch_size + 1, len(self._memory)):
-            mini_batch.append(self._memory[i])
-            
+
         for state, action, reward, next_state, done in mini_batch:
-            if done:
-                # special condition for last training epoch in batch (no next_state)
-                optimal_q_for_action = reward  
+            # current Q
+            q_current = self.get_q_values(state)  # shape [1, A]
+
+            if done or next_state is None:
+                target_for_action = reward
             else:
-                # target Q-value is updated using the Bellman equation: reward + gamma * max(predicted Q-value of next state)
-                optimal_q_for_action = reward + self._gamma * np.max(self.get_q_values(next_state))
-                
-            # Get the predicted Q-values of the current state
-            q_table = self.get_q_values(state)
-            # Update the output Q table - replace the predicted Q value for action with the target Q value for action 
-            q_table[0][action] = optimal_q_for_action
-            # Fit the model where state is X and target_q_table is Y
-            history = self.fit_model(state, q_table)
-            losses += history.history['loss']
-           
-        # define epsilon decay (for the act function)
-        if self.epsilon > self._epsilon_min:
-            self.epsilon *= self._epsilon_decay
+                q_next = self.get_q_values(next_state)
+                target_for_action = reward + self._gamma * float(np.max(q_next, axis=1))
+
+            # set target
+            q_target = q_current.copy()
+            q_target[0, action] = target_for_action
+
+            hist = self.fit_model(state, q_target)
+            losses.extend(hist.history.get('loss', []))
+
+        # epsilon decay
+        if self._epsilon > self._epsilon_min and not self._test_mode:
+            self._epsilon *= self._epsilon_decay
+
         return losses
+    
+    def _compute_reward(self, prev_pos: int, action: int, curr_price: float, next_price: float) -> tuple[float, int]:
+        # Update position from action
+        if action == 0:
+            pos_t = prev_pos
+        elif action == 1:
+            pos_t = 1
+        elif action == 2:
+            pos_t = 0
+
+        ret = (next_price - curr_price) / max(curr_price, 1e-12)
+        trade_cost = 0.0005 if pos_t != prev_pos else 0.0
+        reward = pos_t * ret - trade_cost
+        return reward, pos_t
+    
+    
+    def train(self, esl: EpisodeStateLoader, episodes_ids: list[int], batch_size: int):
+        batch_losses = []
+        tickers = esl.get_all_tickers()
+
+        for e in episodes_ids:
+            total_profit = 0.0
+            winners = 0
+            losers = 0
+
+            for ticker in tickers:
+                L = esl.get_episode_len('train', e, ticker)
+                if L < self._window_size + 1:
+                    # not enough ticker data for a window and a next step
+                    continue 
+
+                # initial state at t = window_size - 1
+                t0 = self._window_size - 1
+                state = esl.get_state_matrix('train', e, ticker, t0, self._window_size)
+
+                prev_pos = 0  # start flat
+                entry_price = None  # optional, for realized PnL logging
+
+                # iterate until L-2 so t+1 exists
+                for t in tqdm(range(t0, L - 1), desc=f'Episode {e} | {ticker}', leave=False):
+                    action = self.act(state)
+
+                    # prices for reward
+                    curr_price = float(esl.get_state_OHLCV('train', e, ticker, t)[3])
+                    next_price = float(esl.get_state_OHLCV('train', e, ticker, t + 1)[3])
+
+                    # compute reward and update position
+                    reward, pos_t = self._compute_reward(prev_pos, action, curr_price, next_price)
+
+                    # optional bookkeeping for realized PnL stats when a trade ends
+                    if prev_pos == 0 and pos_t == 1:
+                        entry_price = curr_price  # entered at t close, pay cost inside reward
+                    if prev_pos == 1 and pos_t == 0 and entry_price is not None:
+                        trade_pnl = curr_price - entry_price  # realized at sell time t
+                        total_profit += trade_pnl
+                        if trade_pnl >= 0:
+                            winners += trade_pnl
+                        else:
+                            losers += trade_pnl
+                        entry_price = None
+
+                    # next state
+                    next_state = esl.get_state_matrix('train', e, ticker, t + 1, self._window_size)
+                    done = (t == L - 2)  # last transition uses p_{L-1} -> p_{L}
+
+                    # store transition
+                    self._memory.append((state, action, reward, next_state, done))
+
+                    # train from replay if enough samples
+                    if len(self._memory) >= batch_size:
+                        losses = self.exp_replay(batch_size)
+                        if len(losses) > 0:
+                            batch_losses.append(float(np.sum(losses)))
+
+                    # advance
+                    state = next_state
+                    prev_pos = pos_t
+
+            # save every episode if not testing
+            if not self._test_mode and (e % 2 == 0):
+                self._model.save(f'model_ep{e}.keras')
+
+        return batch_losses

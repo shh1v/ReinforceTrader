@@ -72,7 +72,18 @@ class EpisodeStateLoader:
     def get_all_tickers(self) -> list:
         return list(self._ticker_symbols)
 
-    def get_state_matrix(self, episode_type: str, episode_id: int, ticker, end_index: int, window_size: int):
+    def get_episode_len(self, episode_type: str, episode_id: int, ticker: str) -> int:
+        match episode_type:
+            case 'train':
+                return len(self._train_features[(episode_id, ticker)])
+            case 'validate':
+                return len(self._val_features[(episode_id, ticker)])
+            case 'test':
+                return len(self._test_features[(episode_id, ticker)])
+            case _:
+                raise ValueError(f"Invalid episode type: {episode_type}")
+
+    def get_state_matrix(self, episode_type: str, episode_id: int, ticker: str, end_index: int, window_size: int):
         # Get the respective feature data for the episode type
         match episode_type:
             case 'train':
@@ -109,7 +120,7 @@ class EpisodeStateLoader:
 
         return state_matrix
     
-    def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker, index: int):
+    def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int):
         # Get the respective feature data for the episode type
         match episode_type:
             case 'train':
