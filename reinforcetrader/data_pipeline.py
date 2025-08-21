@@ -10,21 +10,31 @@ from ta.momentum import RSIIndicator
 
 
 class RawDataLoader:
-    def __init__(self, start_date: str, end_date: str):
+    def __init__(self, start_date: str, end_date: str, index: str='DJI'):
         # Store the start and end dates of data to be downloaded/load from cache
         self._start_date = start_date
         self._end_date = end_date
+        self._index = index
 
         # Fetch all the tickers in S&P 500
-        tickers = self._fetch_tickers()
+        tickers = self._fetch_tickers(index=self._index)
 
         # Load all the ticker price and volume data
         self._hist_data = self._load_hist_prices(tickers)
             
-    def _fetch_tickers(self) -> list:
-        # Fetch the S&P 500 tickers list from wikipedia
-        ticker_table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
+    def _fetch_tickers(self, index: str='DJI') -> list:
+        if index == 'DJI':
+            table_link = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
+            table_idx = 2
+        elif index == 'SP500':
+            table_link = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+            table_idx = 0
+        else:
+            raise ValueError('Invalid index: {index}')
         
+        # Fetch the S&P 500 tickers list from wikipedia
+        ticker_table = pd.read_html(table_link)[table_idx]
+
         # Get ticker names and exclude class B shares
         tickers = [ticker for ticker in ticker_table['Symbol'] if '.B' not in ticker]
     
@@ -68,7 +78,7 @@ class RawDataLoader:
         # Build cache directory and file path
         cache_dir = Path(cache_path)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        file_path = cache_dir / f"tickers_data_{self._start_date}_{self._end_date}.csv"
+        file_path = cache_dir / f"{self._index}_tickers_data_{self._start_date}_{self._end_date}.csv"
 
         # If cached file exists, load and return
         if file_path.exists():
@@ -86,9 +96,10 @@ class RawDataLoader:
         return self._hist_data
 
 class FeatureBuilder:
-    def __init__(self, hist_prices):
+    def __init__(self, hist_prices, index='DJI'):
         self._hist_prices = hist_prices.sort_index()
         self._features_data = None
+        self._index = index
 
     def _save_features_data(self, save_dir='data/processed') -> bool:
         if self._features_data is None or self._features_data.empty:
@@ -101,7 +112,7 @@ class FeatureBuilder:
         dates = self._features_data.index
         start_date = dates[0].strftime('%Y-%m-%d')
         end_date = dates[-1].strftime('%Y-%m-%d')
-        file_path = save_dir / f"tickers_features_{start_date}_{end_date}.csv"
+        file_path = save_dir / f"{self._index}_tickers_features_{start_date}_{end_date}.csv"
 
         # Check if feature file already exists
         if file_path.exists():
