@@ -2,6 +2,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+from typing import Any
 from tensorflow import keras
 from tensorflow.keras import Input, layers, optimizers
 from collections import deque
@@ -64,6 +65,9 @@ class RLAgent:
 
         # Load model or define new
         self._model = keras.models.load_model(model_name) if self._test_mode else self._init_model()
+        
+        # Init target network update and frequency
+        self._init_target_network()
     
     def get_model(self):
         return self._model
@@ -78,6 +82,26 @@ class RLAgent:
 
         return dual_dqn.get_model()
 
+    def _init_target_network(self):
+        # Make a structural clone and copy weights
+        self._target_model = keras.models.clone_model(self._model)
+        self._target_model.set_weights(self._model.get_weights())
+
+
+    def update_target_network(self, tau: float = 1.0):
+        # tau = 1.0 : hard update (copy weights exactly)
+        # tau < 1.0 : soft/Polyak update (exponential moving average)
+        
+        online_weights = self._model.get_weights()
+        target_weights = self._target_model.get_weights()
+
+        new_weights = [
+            tau * w_online + (1.0 - tau) * w_target
+            for w_online, w_target in zip(online_weights, target_weights)]
+
+        self._target_model.set_weights(new_weights)
+
+    
     def _get_states(self, state_matrix: np.ndarray) -> dict[str, np.ndarray]:
         # Check the state matrix shape is correct
         total_features = self._num_motif_feat + self._num_context_feat
@@ -121,32 +145,80 @@ class RLAgent:
         if len(self._memory) < batch_size:
             return []
 
-        # take the last batch_size items
-        mini_batch = [self._memory[i] for i in range(len(self._memory) - batch_size, len(self._memory))]
-        losses = []
+        # Derive batch from memory and shuffle
+        memory_size = len(self._memory)
+        idx = np.random.permutation(np.arange(memory_size - batch_size, memory_size))
+        batch = [self._memory[i] for i in idx]
 
-        for state, action, reward, next_state, done in mini_batch:
-            # current Q
-            q_current = self.get_q_values(state)  # shape [1, A]
+        # Pre-allocate arrays for simplicity
+        B = batch_size
+        W = self._window_size
+        M = self._num_motif_feat
+        C = self._num_context_feat
 
-            if done or next_state is None:
-                target_for_action = reward
+        motif_batch = np.empty((B, W, M), dtype=np.float32)
+        context_batch = np.empty((B, W * C), dtype=np.float32)
+        next_motif_batch = np.empty((B, W, M), dtype=np.float32)
+        next_context_batch = np.empty((B, W * C), dtype=np.float32)
+
+        actions = np.empty((B,), dtype=np.int32)
+        rewards = np.empty((B,), dtype=np.float32)
+        dones = np.empty((B,), dtype=np.float32)
+
+        # Build batched tensors from transitions
+        for i, (state, action, reward, next_state, done) in enumerate(batch):
+            # split motif / context for current state
+            motif_state = state[:, :M]
+            context_state = state[:, M:]
+            motif_batch[i] = motif_state
+            context_batch[i] = context_state.reshape(-1)
+
+            # split motif / context for next state
+            # Note: if None, reuse current & mark done. Although not possible
+            if next_state is None:
+                next_motif_batch[i] = motif_state
+                next_context_batch[i] = context_state.reshape(-1)
+                dones[i] = 1.0
             else:
-                q_next = self.get_q_values(next_state)
-                target_for_action = reward + self._gamma * float(np.max(q_next, axis=1))
+                next_motif_state = next_state[:, :M]
+                next_context_state = next_state[:, M:]
+                next_motif_batch[i] = next_motif_state
+                next_context_batch[i] = next_context_state.reshape(-1)
+                dones[i] = 1.0 if done else 0.0
 
-            # set target
-            q_target = q_current.copy()
-            q_target[0, action] = target_for_action
+            actions[i] = action
+            rewards[i] = reward
 
-            hist = self.fit_model(state, q_target)
-            losses.extend(hist.history.get('loss', []))
+        # Forward passes on the whole batch. q_current: [B, A]
+        q_current = self._model.predict(
+            {"motif_input": motif_batch, "context_input": context_batch},
+            verbose=0)
 
-        # epsilon decay
+        # Use target model to stabilize learning. q_next: [B, A]
+        q_next = self._target_model.predict(
+            {"motif_input": next_motif_batch, "context_input": next_context_batch},
+            verbose=0)
+
+        # Use Bellman equation to compute targets for our q_current
+        max_q_next = np.max(q_next, axis=1).astype(np.float32)  # [B]
+        targets = q_current.copy()
+        targets[:, actions] = rewards + (1.0 - dones) * (self._gamma * max_q_next)
+
+        # Train the model on the whole batch
+        loss = self._model.train_on_batch(
+            {"motif_input": motif_batch, "context_input": context_batch},
+            targets)
+
+        # Update target network using polyak update
+        self.update_target_network(tau=0.005)
+
+        # epsilon decay (outside GPU path)
         if self._epsilon > self._epsilon_min and not self._test_mode:
             self._epsilon *= self._epsilon_decay
+        
+        # Keras returns the scaler loss
+        return float(loss)
 
-        return losses
     
     def _compute_reward(self, prev_pos: int, action: int, curr_price: float, next_price: float) -> tuple[float, int]:
         # Update position from action
@@ -157,20 +229,21 @@ class RLAgent:
         elif action == 2:
             pos_t = 0
 
-        ret = (next_price - curr_price) / max(curr_price, 1e-12)
+        log_ret = np.log(next_price / max(curr_price, 1e-12))
         trade_cost = 0.0005 if pos_t != prev_pos else 0.0
-        reward = pos_t * ret - trade_cost
+        reward = pos_t * log_ret - trade_cost
         return reward, pos_t
     
-    def train(self, esl: EpisodeStateLoader, episodes_ids: list[int], batch_size: int, val_group_size: int = 5, out_dir: str='runs/'):
-        # Make runs directory if it does not exist
-        os.makedirs(out_dir, exist_ok=True)
+    def train(self, esl: EpisodeStateLoader, episode_ids: list[int], config: dict[str, Any]) -> dict[str, Any]:
+        # Make req. directories if not exist
+        os.makedirs(config['model_dir'], exist_ok=True)
+        os.makedirs(config['plots_dir'], exist_ok=True)
 
         logs_by_episode = {}
 
         tickers_all = esl.get_all_tickers()
 
-        for e in episodes_ids:
+        for e in episode_ids:
             # Per-episode per-group stores of training performance
             group_train_losses = []   # list of floats, one per group
             group_val_losses   = []   # list of floats, one per group
@@ -185,28 +258,22 @@ class RLAgent:
                 L = esl.get_episode_len('train', e, ticker)
                 if L < self._window_size + 1:
                     # skip tickers that don't have enough data for a window and next step
+                    # Not the case for the regime episode configuration file
                     continue
 
-                # Train on this ticker for the episode (standard rollout with replay) ----
+                # Train on this ticker for the episode (standard rollout with replay)
                 t0 = self._window_size - 1
                 state = esl.get_state_matrix('train', e, ticker, t0, self._window_size)
                 prev_pos = 0
-                entry_price = None
 
                 for t in tqdm(range(t0, L - 1), desc=f'Train ep {e} | {ticker}', ncols=100):
+                    # Find action based on behaviour policy
                     action = self.act(state)
 
                     curr_price = float(esl.get_state_OHLCV('train', e, ticker, t)[3])
                     next_price = float(esl.get_state_OHLCV('train', e, ticker, t + 1)[3])
 
                     reward, pos_t = self._compute_reward(prev_pos, action, curr_price, next_price)
-
-                    # optional realized pnl bookkeeping (not used for losses here)
-                    if prev_pos == 0 and pos_t == 1:
-                        entry_price = curr_price
-                    if prev_pos == 1 and pos_t == 0 and entry_price is not None:
-                        # realized at sell; not needed for loss
-                        entry_price = None
 
                     next_state = esl.get_state_matrix('train', e, ticker, t + 1, self._window_size)
                     done = (t == L - 2)
@@ -215,10 +282,9 @@ class RLAgent:
                     self._memory.append((state, action, reward, next_state, done))
 
                     # train from replay if enough samples; accumulate training loss for this group
-                    if len(self._memory) >= batch_size:
-                        losses = self.exp_replay(batch_size)
-                        if len(losses) > 0:
-                            train_loss_accum_group += float(np.sum(losses))
+                    if len(self._memory) >= config['batch_size']:
+                        losses = self.exp_replay(config['batch_size'])
+                        train_loss_accum_group += losses
 
                     # advance
                     state = next_state
@@ -228,7 +294,7 @@ class RLAgent:
                 group_tickers.append(ticker)
 
                 # If we've finished a group of tickers (val_group_size), run group validation
-                if len(group_tickers) == val_group_size:
+                if len(group_tickers) == config['val_group_size']:
                     # Validation on the same episode, only over these group tickers
                     val_stats = self._run_validation_group(esl, e, group_tickers, split='validate')
 
@@ -254,13 +320,12 @@ class RLAgent:
                 train_loss_accum_group = 0.0
                 group_tickers = []
 
-            # End of episode: plot one figure (training vs validation loss over groups) ----
-            fig_path = os.path.join(out_dir, f"ep{e}_group_losses.png")
+            # End of episode: plot one figure (training vs validation loss over groups)
+            fig_path = os.path.join(config['plots_dir'], f"ep{e}_group_losses.png")
             self._plot_group_losses(group_train_losses, group_val_losses, fig_path)
 
             # Save model checkpoint
-            if not self._test_mode:
-                self._model.save(os.path.join(out_dir, f"model_ep{e}.keras"))
+            self._model.save(os.path.join(config['model_dir'], f"model_ep{e}.keras"))
 
             # Save logs for this episode
             logs_by_episode[e] = {
@@ -274,8 +339,9 @@ class RLAgent:
 
 
     def _run_validation_group(self, esl: EpisodeStateLoader, episode_id: int, tickers: list[str], split: str = 'validate'):
-        eps_backup = self._epsilon
-        self._epsilon = 0.0  # greedy
+        # switch to test mode for validation
+        prev_test_mode = self._test_mode
+        self._test_mode = True
 
         total_reward = 0.0
         total_trades = 0
@@ -293,19 +359,19 @@ class RLAgent:
             entry_price = None
 
             for t in range(t0, L - 1):
-                action = self.act(state)  # greedy due to epsilon=0
-                p_t   = float(esl.get_state_OHLCV(split, episode_id, ticker, t)[3])
-                p_tp1 = float(esl.get_state_OHLCV(split, episode_id, ticker, t + 1)[3])
+                action = self.act(state)
+                curr_price   = float(esl.get_state_OHLCV(split, episode_id, ticker, t)[3])
+                next_price = float(esl.get_state_OHLCV(split, episode_id, ticker, t + 1)[3])
 
-                r_t, pos_t = self._compute_reward(prev_pos, action, p_t, p_tp1)
+                r_t, pos_t = self._compute_reward(prev_pos, action, curr_price, next_price)
                 total_reward += r_t
 
-                # simple trade bookkeeping (optional)
+                # simple trade bookkeeping
                 if prev_pos == 0 and pos_t == 1:
-                    entry_price = p_t
+                    entry_price = curr_price
                     total_trades += 1
                 if prev_pos == 1 and pos_t == 0 and entry_price is not None:
-                    trade_pnl = p_t - entry_price
+                    trade_pnl = curr_price - entry_price
                     if trade_pnl >= 0:
                         wins += 1
                     else:
@@ -315,7 +381,7 @@ class RLAgent:
                 next_state = esl.get_state_matrix(split, episode_id, ticker, t + 1, self._window_size)
                 state, prev_pos = next_state, pos_t
 
-        self._epsilon = eps_backup
+        self._test_mode = prev_test_mode
 
         hit_rate = wins / max(wins + losses, 1)
         return {
@@ -327,7 +393,25 @@ class RLAgent:
             "hit_rate": float(hit_rate),
         }
 
-
-    def _plot_group_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None):
+    def _plot_group_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None, show=True):
         x = np.arange(1, len(train_losses) + 1)
+
         plt.figure(figsize=(10, 4))
+        plt.plot(x, train_losses, marker='o', linewidth=2, label='Train loss (sum per group)')
+        plt.plot(x, val_losses, marker='s', linewidth=2, label='Validation loss (-sum reward)')
+
+        plt.title('Group losses over training (per episode)')
+        plt.xlabel('Ticker group index')
+        plt.ylabel('Loss')
+        plt.grid(True, linestyle='--', alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+
+        if fname:
+            os.makedirs(os.path.dirname(fname), exist_ok=True)
+            plt.savefig(fname, dpi=150)
+        
+        if show:
+            plt.show()
+        else:
+            plt.close()
