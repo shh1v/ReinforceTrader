@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from .state import EpisodeStateLoader
 
-@keras.saving.register_keras_serializable()
+@keras.utils.register_keras_serializable()
 # Define DQN Model Architecture
 class DualBranchDQN(keras.Model):
     def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int):
