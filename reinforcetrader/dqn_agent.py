@@ -245,16 +245,19 @@ class RLAgent:
 
         for e in episode_ids:
             # Per-episode per-group stores of training performance
-            group_train_losses = []   # list of floats, one per group
-            group_val_losses   = []   # list of floats, one per group
-            group_labels       = []   # string labels showing which tickers were in the group
+            # list of train loss (floats), one per group
+            group_train_losses = []
+            # list of validation results (dict), one per group
+            group_val_results = []
+            # string labels showing which tickers were in the group
+            group_labels = []
 
             # Running training-loss accumulator within the current group
             train_loss_accum_group = 0.0
 
             # Iterate tickers, training sequentially
             group_tickers = []
-            for ticker in tickers_all:
+            for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
                 L = esl.get_episode_len('train', e, ticker)
                 if L < self._window_size + 1:
                     # skip tickers that don't have enough data for a window and next step
@@ -266,7 +269,7 @@ class RLAgent:
                 state = esl.get_state_matrix('train', e, ticker, t0, self._window_size)
                 prev_pos = 0
 
-                for t in tqdm(range(t0, L - 1), desc=f'Train ep {e} | {ticker}', ncols=100):
+                for t in range(t0, L - 1):
                     # Find action based on behaviour policy
                     action = self.act(state)
 
@@ -283,8 +286,8 @@ class RLAgent:
 
                     # train from replay if enough samples; accumulate training loss for this group
                     if len(self._memory) >= config['batch_size']:
-                        losses = self.exp_replay(config['batch_size'])
-                        train_loss_accum_group += losses
+                        loss = self.exp_replay(config['batch_size'])
+                        train_loss_accum_group += loss
 
                     # advance
                     state = next_state
@@ -298,13 +301,10 @@ class RLAgent:
                     # Validation on the same episode, only over these group tickers
                     val_stats = self._run_validation_group(esl, e, group_tickers, split='validate')
 
-                    # Define validation "loss" as negative sum_reward for comparability with training loss
-                    val_loss = -float(val_stats["sum_reward"])
-
                     # Record
                     group_train_losses.append(train_loss_accum_group)
-                    group_val_losses.append(val_loss)
-                    group_labels.append(",".join(group_tickers))
+                    group_val_results.append(val_stats)
+                    group_labels.append([",".join(group_tickers)])
 
                     # Reset for next group
                     train_loss_accum_group = 0.0
@@ -313,15 +313,15 @@ class RLAgent:
             # If there are leftover tickers in the last partial group, validate them too
             if len(group_tickers) > 0:
                 val_stats = self._run_validation_group(esl, e, group_tickers, split='validate')
-                val_loss = -float(val_stats["sum_reward"])
                 group_train_losses.append(train_loss_accum_group)
-                group_val_losses.append(val_loss)
-                group_labels.append(",".join(group_tickers))
+                group_val_results.append(val_stats)
+                group_labels.append([",".join(group_tickers)])
                 train_loss_accum_group = 0.0
                 group_tickers = []
 
             # End of episode: plot one figure (training vs validation loss over groups)
             fig_path = os.path.join(config['plots_dir'], f"ep{e}_group_losses.png")
+            group_val_losses = [-d['sum_reward'] for d in group_val_results]
             self._plot_group_losses(group_train_losses, group_val_losses, fig_path)
 
             # Save model checkpoint
@@ -330,7 +330,7 @@ class RLAgent:
             # Save logs for this episode
             logs_by_episode[e] = {
                 "group_train_losses": group_train_losses,
-                "group_val_losses": group_val_losses,
+                "group_val_results": group_val_results,
                 "group_labels": group_labels,
                 "figure": fig_path,
             }
@@ -393,25 +393,43 @@ class RLAgent:
             "hit_rate": float(hit_rate),
         }
 
-    def _plot_group_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None, show=True):
+    def _plot_group_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None, show: bool = True):
+
         x = np.arange(1, len(train_losses) + 1)
 
-        plt.figure(figsize=(10, 4))
-        plt.plot(x, train_losses, marker='o', linewidth=2, label='Train loss (sum per group)')
-        plt.plot(x, val_losses, marker='s', linewidth=2, label='Validation loss (-sum reward)')
+        fig, ax1 = plt.subplots(figsize=(10, 4))
+
+        # Left axis: training loss
+        ax1.plot(x, train_losses, marker='o', linewidth=2, color='tab:blue',
+                label='Train loss (sum per group)')
+        ax1.set_xlabel('Ticker group index')
+        ax1.set_ylabel('Train loss', color='tab:blue')
+        ax1.tick_params(axis='y', labelcolor='tab:blue')
+        ax1.grid(True, linestyle='--', alpha=0.3)
+
+        # Right axis: validation loss
+        ax2 = ax1.twinx()
+        ax2.plot(x, val_losses, marker='s', linewidth=2, color='tab:orange',
+                label='Validation loss (−sum reward)')
+        ax2.set_ylabel('Validation loss', color='tab:orange')
+        ax2.tick_params(axis='y', labelcolor='tab:orange')
+
+        # Combine legends
+        lines, labels = [], []
+        for ax in [ax1, ax2]:
+            l, lab = ax.get_legend_handles_labels()
+            lines.extend(l)
+            labels.extend(lab)
+        ax1.legend(lines, labels, loc='best')
 
         plt.title('Group losses over training (per episode)')
-        plt.xlabel('Ticker group index')
-        plt.ylabel('Loss')
-        plt.grid(True, linestyle='--', alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
+        fig.tight_layout()
 
         if fname:
             os.makedirs(os.path.dirname(fname), exist_ok=True)
             plt.savefig(fname, dpi=150)
-        
+
         if show:
             plt.show()
         else:
-            plt.close()
+            plt.close(fig)
