@@ -221,6 +221,8 @@ class RLAgent:
 
     @staticmethod
     def calculate_reward(prev_pos: int, action: int, curr_price: float, next_price: float) -> tuple[float, int]:
+        # Note: A buy signal when prev_pos is 1 is equivlent to hold
+        # A sell signal when prev_pos is 0 is equivlent to hold
         # Update position from action
         if action == 0:
             pos_t = prev_pos
