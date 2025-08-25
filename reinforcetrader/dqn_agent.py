@@ -13,7 +13,7 @@ from .state import EpisodeStateLoader
 @keras.utils.register_keras_serializable()
 # Define DQN Model Architecture
 class DualBranchDQN(keras.Model):
-    def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int):
+    def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int) -> None:
         super().__init__()
 
         # Motif Branch for finding candle patterns using Conv1D
@@ -42,7 +42,7 @@ class DualBranchDQN(keras.Model):
         return self._model
 
 class RLAgent:
-    def __init__(self, window_size: int, num_features: tuple[int, int], test_mode: int=False, model_name: str=''):
+    def __init__(self, window_size: int, num_features: tuple[int, int], test_mode: int=False, model_name: str='') -> None:
         # Store state and action representation configurations
         self._window_size = window_size
         self._num_motif_feat, self._num_context_feat = num_features
@@ -69,7 +69,7 @@ class RLAgent:
         # Init target network update and frequency
         self._init_target_network()
     
-    def get_model(self):
+    def get_model(self) -> keras.Model:
         return self._model
 
     def _init_model(self) -> keras.Model:
@@ -82,13 +82,13 @@ class RLAgent:
 
         return dual_dqn.get_model()
 
-    def _init_target_network(self):
+    def _init_target_network(self) -> None:
         # Make a structural clone and copy weights
         self._target_model = keras.models.clone_model(self._model)
         self._target_model.set_weights(self._model.get_weights())
 
 
-    def update_target_network(self, tau: float = 1.0):
+    def update_target_network(self, tau: float = 1.0) -> None:
         # tau = 1.0 : hard update (copy weights exactly)
         # tau < 1.0 : soft/Polyak update (exponential moving average)
         
@@ -124,7 +124,7 @@ class RLAgent:
 
         return q_values
     
-    def fit_model(self, state_matrix: np.ndarray, target_q: np.ndarray):
+    def fit_model(self, state_matrix: np.ndarray, target_q: np.ndarray) -> float:
         # Compute MSE loss between actual and target q values
         model_input = self._get_states(state_matrix)
         loss = self._model.fit(model_input, target_q, epochs=1, verbose=0)    
@@ -141,7 +141,7 @@ class RLAgent:
         q_values = self.get_q_values(state_matrix)
         return int(np.argmax(q_values))
 
-    def exp_replay(self, batch_size: int):
+    def exp_replay(self, batch_size: int) -> None:
         if len(self._memory) < batch_size:
             return []
 
@@ -219,8 +219,10 @@ class RLAgent:
         # Keras returns the scaler loss
         return float(loss)
 
-    
-    def _compute_reward(self, prev_pos: int, action: int, curr_price: float, next_price: float) -> tuple[float, int]:
+    @staticmethod
+    def calculate_reward(prev_pos: int, action: int, curr_price: float, next_price: float) -> tuple[float, int]:
+        # Note: A buy signal when prev_pos is 1 is equivlent to hold
+        # A sell signal when prev_pos is 0 is equivlent to hold
         # Update position from action
         if action == 0:
             pos_t = prev_pos
@@ -234,14 +236,14 @@ class RLAgent:
         reward = pos_t * log_ret - trade_cost
         return reward, pos_t
     
-    def train(self, esl: EpisodeStateLoader, episode_ids: list[int], config: dict[str, Any]) -> dict[str, Any]:
+    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], config: dict[str, Any]) -> dict[str, Any]:
         # Make req. directories if not exist
         os.makedirs(config['model_dir'], exist_ok=True)
         os.makedirs(config['plots_dir'], exist_ok=True)
 
         logs_by_episode = {}
 
-        tickers_all = esl.get_all_tickers()
+        tickers_all = state_loader.get_all_tickers()
 
         for e in episode_ids:
             # Per-episode per-group stores of training performance
@@ -258,7 +260,7 @@ class RLAgent:
             # Iterate tickers, training sequentially
             group_tickers = []
             for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
-                L = esl.get_episode_len('train', e, ticker)
+                L = state_loader.get_episode_len('train', e, ticker)
                 if L < self._window_size + 1:
                     # skip tickers that don't have enough data for a window and next step
                     # Not the case for the regime episode configuration file
@@ -266,19 +268,19 @@ class RLAgent:
 
                 # Train on this ticker for the episode (standard rollout with replay)
                 t0 = self._window_size - 1
-                state = esl.get_state_matrix('train', e, ticker, t0, self._window_size)
+                state = state_loader.get_state_matrix('train', e, ticker, t0, self._window_size)
                 prev_pos = 0
 
                 for t in range(t0, L - 1):
                     # Find action based on behaviour policy
                     action = self.act(state)
 
-                    curr_price = float(esl.get_state_OHLCV('train', e, ticker, t)[3])
-                    next_price = float(esl.get_state_OHLCV('train', e, ticker, t + 1)[3])
+                    curr_price = float(state_loader.get_state_OHLCV('train', e, ticker, t)[3])
+                    next_price = float(state_loader.get_state_OHLCV('train', e, ticker, t + 1)[3])
 
-                    reward, pos_t = self._compute_reward(prev_pos, action, curr_price, next_price)
+                    reward, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_price, next_price)
 
-                    next_state = esl.get_state_matrix('train', e, ticker, t + 1, self._window_size)
+                    next_state = state_loader.get_state_matrix('train', e, ticker, t + 1, self._window_size)
                     done = (t == L - 2)
 
                     # store transition
@@ -299,7 +301,7 @@ class RLAgent:
                 # If we've finished a group of tickers (val_group_size), run group validation
                 if len(group_tickers) == config['val_group_size']:
                     # Validation on the same episode, only over these group tickers
-                    val_stats = self._run_validation_group(esl, e, group_tickers, split='validate')
+                    val_stats = self._run_validation_group(state_loader, e, group_tickers, split='validate')
 
                     # Record
                     group_train_losses.append(train_loss_accum_group)
@@ -312,7 +314,7 @@ class RLAgent:
 
             # If there are leftover tickers in the last partial group, validate them too
             if len(group_tickers) > 0:
-                val_stats = self._run_validation_group(esl, e, group_tickers, split='validate')
+                val_stats = self._run_validation_group(state_loader, e, group_tickers, split='validate')
                 group_train_losses.append(train_loss_accum_group)
                 group_val_results.append(val_stats)
                 group_labels.append([",".join(group_tickers)])
@@ -363,7 +365,7 @@ class RLAgent:
                 curr_price   = float(esl.get_state_OHLCV(split, episode_id, ticker, t)[3])
                 next_price = float(esl.get_state_OHLCV(split, episode_id, ticker, t + 1)[3])
 
-                r_t, pos_t = self._compute_reward(prev_pos, action, curr_price, next_price)
+                r_t, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_price, next_price)
                 total_reward += r_t
 
                 # simple trade bookkeeping
