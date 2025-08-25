@@ -22,10 +22,10 @@ class RawDataLoader:
         elif not tickers and not index:
             raise ValueError('Either tickers or index must be provided.')
         
-        # If tickers are provided, do load them from cache
+        # If tickers are provided, do not load them from cache
         load_from_cache = False
                 
-        # Fetch all the tickers in index if tickers are not provided
+        # Fetch all the tickers in index if specific tickers are not provided
         if not tickers:
             # Prefer loading from cache to avoid API calls
             load_from_cache = True
@@ -36,17 +36,21 @@ class RawDataLoader:
             
     def _fetch_tickers(self, index: str='DJI') -> list:
         if index == 'DJI':
-            table_link = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
-            table_idx = 2
+            url = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
         elif index == 'SP500':
-            table_link = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            table_idx = 0
+            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         else:
             raise ValueError('Invalid index: {index}')
         
-        # Fetch the S&P 500 tickers list from wikipedia
-        ticker_table = pd.read_html(table_link)[table_idx]
-
+        # Fetch the Index tables from wikipedia (one of them should be list of tickers)
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; ReinforceTrader/1.0)"}
+        tables = pd.read_html(url, storage_options=headers)
+        
+        # Find the table with a 'Symbol' column (which is usually the list of tickers)
+        ticker_table = next((table for table in tables if 'Symbol' in table.columns), None)
+        if ticker_table is None:
+            raise ValueError('Couldn\'t find a table with a \'Symbol\' column on the page.')
+        
         # Get ticker names and exclude class B shares
         tickers = [ticker for ticker in ticker_table['Symbol'] if '.B' not in ticker]
     
@@ -142,12 +146,17 @@ class FeatureBuilder:
         tickers = self._hist_prices.columns.get_level_values('Ticker').unique()
 
         # Predefine feature names
+        # Include OHLCV for reward fn, portfolio managment, and more
         OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
-        price_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL']
+        # InTrade flag, 1 for in-trade, 0 for out-of-trade
+        trade_f = ['InTrade']
+        # Include motif feature to identify candlestick patterns
+        motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL']
+        # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
         technical_f = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
-        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + price_f + technical_f],
+        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + motif_f + trade_f + technical_f],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._hist_prices.index, columns=feature_columns, dtype=float)
 
@@ -165,6 +174,9 @@ class FeatureBuilder:
             self._features_data.loc[:, (ticker, 'Close')] = close
             self._features_data.loc[:, (ticker, 'Volume')] = volume
 
+            # Initlialize in-trade flag to integer 0
+            self._features_data.loc[:, (ticker, 'InTrade')] = 0
+            
             # Compute the candle body features
             # Body relative to total range, clip for stability
             candle_range = (high - low).replace(0, 1e-12)
