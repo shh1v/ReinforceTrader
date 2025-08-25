@@ -141,9 +141,9 @@ class RLAgent:
         q_values = self.get_q_values(state_matrix)
         return int(np.argmax(q_values))
 
-    def exp_replay(self, batch_size: int) -> None:
+    def exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
-            return []
+            raise ValueError('Not data in replay buffer to run exp. replay')
 
         # Derive batch from memory and shuffle
         memory_size = len(self._memory)
@@ -291,7 +291,10 @@ class RLAgent:
                         loss = self.exp_replay(config['batch_size'])
                         train_loss_accum_group += loss
 
-                    # advance
+                    # Update the current state's InTrade flag based on the action taken
+                    state_loader.update_trade_state('train', e, ticker, t, pos_t)
+                    
+                    # Advance to the next state
                     state = next_state
                     prev_pos = pos_t
 
@@ -340,7 +343,7 @@ class RLAgent:
         return logs_by_episode
 
 
-    def _run_validation_group(self, esl: EpisodeStateLoader, episode_id: int, tickers: list[str], split: str = 'validate'):
+    def _run_validation_group(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str], split: str = 'validate'):
         # switch to test mode for validation
         prev_test_mode = self._test_mode
         self._test_mode = True
@@ -351,19 +354,19 @@ class RLAgent:
         losses = 0
 
         for ticker in tickers:
-            L = esl.get_episode_len(split, episode_id, ticker)
+            L = state_loader.get_episode_len(split, episode_id, ticker)
             if L < self._window_size + 1:
                 continue
 
             t0 = self._window_size - 1
-            state = esl.get_state_matrix(split, episode_id, ticker, t0, self._window_size)
+            state = state_loader.get_state_matrix(split, episode_id, ticker, t0, self._window_size)
             prev_pos = 0
             entry_price = None
 
             for t in range(t0, L - 1):
                 action = self.act(state)
-                curr_price   = float(esl.get_state_OHLCV(split, episode_id, ticker, t)[3])
-                next_price = float(esl.get_state_OHLCV(split, episode_id, ticker, t + 1)[3])
+                curr_price = float(state_loader.get_state_OHLCV(split, episode_id, ticker, t)[3])
+                next_price = float(state_loader.get_state_OHLCV(split, episode_id, ticker, t + 1)[3])
 
                 r_t, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_price, next_price)
                 total_reward += r_t
@@ -380,8 +383,14 @@ class RLAgent:
                         losses += 1
                     entry_price = None
 
-                next_state = esl.get_state_matrix(split, episode_id, ticker, t + 1, self._window_size)
-                state, prev_pos = next_state, pos_t
+                next_state = state_loader.get_state_matrix(split, episode_id, ticker, t + 1, self._window_size)
+                
+                # Update the current state's InTrade flag based on the action taken
+                state_loader.update_trade_state('validate', episode_id, ticker, t, pos_t)
+                
+                # Advance to the next state
+                state =  next_state
+                prev_pos = pos_t
 
         self._test_mode = prev_test_mode
 
