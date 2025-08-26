@@ -36,7 +36,7 @@ class DualBranchDQN(keras.Model):
 
         model_input = {"motif_input": motif_input, "context_input": context_input}
         self._model = keras.Model(inputs=model_input, outputs=Q, name="DualBranchDQN")
-        self._model.compile(loss="mse", optimizer=optimizers.Adam(1e-3))
+        self._model.compile(loss="mse", optimizer=optimizers.Adam(1e-3, clipnorm=1.0))
 
     def get_model(self):
         return self._model
@@ -279,7 +279,7 @@ class RLAgent:
                     self._memory.append((state, prev_pos, action, reward, next_state, pos_t, done))
 
                     # train from replay if enough samples; accumulate training loss for this group
-                    if len(self._memory) >= config['batch_size']:
+                    if len(self._memory) >= config['replay_start_size']:
                         loss = self.exp_replay(config['batch_size'])
                         train_loss_accum_group += loss
                     

@@ -68,8 +68,9 @@ class RawDataLoader:
         data = data.drop(columns=tickers_to_drop, level=0)
         columns_left = data.columns.get_level_values('Ticker').nunique()
         print(f'Dropped {len(tickers_to_drop)} tickers. {columns_left} tickers left.')
+        print(f"Tickers dropped: {', '.join(tickers_to_drop)}")
 
-        return data 
+        return data
 
 
     def _download_hist_prices(self, tickers: list, save: bool, save_path=None) -> pd.DataFrame:
@@ -172,9 +173,12 @@ class FeatureBuilder:
             self._features_data.loc[:, (ticker, 'Close')] = close
             self._features_data.loc[:, (ticker, 'Volume')] = volume
             
+            # Use eps to avoid division by zero
+            eps = 1e-12
+            
             # Compute the candle body features
             # Body relative to total range, clip for stability
-            candle_range = (high - low).replace(0, 1e-12)
+            candle_range = (high - low) + eps
             self._features_data.loc[:, (ticker, 'Body/HL')] = (
                 (close - open) / candle_range
             ).clip(-1, 1)
@@ -205,8 +209,8 @@ class FeatureBuilder:
             bb_upper = bb.bollinger_hband()
             bb_lower = bb.bollinger_lband()
             bb_width = bb_upper - bb_lower
-            self._features_data.loc[:, (ticker, 'B%B')] = ((close - bb_lower) / bb_width)
-            self._features_data.loc[:, (ticker, 'BBW')] = bb_width / bb_sma20
+            self._features_data.loc[:, (ticker, 'B%B')] = (close - bb_lower) / (bb_width + eps)
+            self._features_data.loc[:, (ticker, 'BBW')] = bb_width / (bb_sma20 + eps)
 
             # Compute Relative Strength Index (RSI) scaled bw [-1, 1]
             rsi = RSIIndicator(close, window=14).rsi()

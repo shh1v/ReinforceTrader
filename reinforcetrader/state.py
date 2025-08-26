@@ -82,15 +82,6 @@ class EpisodeStateLoader:
                 return len(self._test_features[(episode_id, ticker)])
             case _:
                 raise ValueError(f"Invalid episode type: {episode_type}")
-        
-        # Update the InTrade state in the feature data for the specified episode and ticker
-        match episode_type:
-            case 'train':
-                self._train_features[(episode_id, ticker)][index, self._in_trade_idx] = InTrade
-            case 'validate':
-                self._val_features[(episode_id, ticker)][index, self._in_trade_idx] = InTrade
-            case 'test':
-                self._test_features[(episode_id, ticker)][index, self._in_trade_idx] = InTrade
     
     def get_state_matrix(self, episode_type: str, episode_id: int, ticker: str, end_index: int, window_size: int):
         # Get the respective feature data for the episode type
