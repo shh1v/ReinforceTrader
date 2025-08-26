@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 
 from typing import Any
 from tensorflow import keras
-from tensorflow.keras import Input, layers, optimizers
 from collections import deque
 from tqdm import tqdm
 
@@ -36,7 +35,7 @@ class DualBranchDQN(keras.Model):
 
         model_input = {"motif_input": motif_input, "context_input": context_input}
         self._model = keras.Model(inputs=model_input, outputs=Q, name="DualBranchDQN")
-        self._model.compile(loss="mse", optimizer=optimizers.Adam(1e-3))
+        self._model.compile(loss="mse", optimizer=optimizers.Adam(1e-3, clipnorm=1.0))
 
     def get_model(self):
         return self._model
@@ -46,10 +45,12 @@ class RLAgent:
         # Store state and action representation configurations
         self._window_size = window_size
         self._num_motif_feat, self._num_context_feat = num_features
-        self._action_size = 3 # Hold: 0, Buy: 1, Sell: 2
+        
+        # Hold: 0, Buy: 1, Sell: 2
+        self._action_size = 3
 
         # Define memory to store (state, action, reward, new_state) pairs for exp. replay
-        self._memory = deque(maxlen=1000)
+        self._memory = deque(maxlen=100000)
 
         # Define inventory to hold trades
         self._inventory = []
@@ -75,7 +76,8 @@ class RLAgent:
     def _init_model(self) -> keras.Model:
         # Compute state shapes for the model
         motif_shape = (self._window_size, self._num_motif_feat)
-        context_size = self._window_size * self._num_context_feat
+        # Note: Add 1 to include the pos_t flag
+        context_size = self._window_size * self._num_context_feat + 1
 
         # Init model
         dual_dqn = DualBranchDQN(motif_shape, context_size, self._action_size)
@@ -102,7 +104,7 @@ class RLAgent:
         self._target_model.set_weights(new_weights)
 
     
-    def _get_states(self, state_matrix: np.ndarray) -> dict[str, np.ndarray]:
+    def _get_states(self, state_matrix: np.ndarray, prev_pos: int) -> dict[str, np.ndarray]:
         # Check the state matrix shape is correct
         total_features = self._num_motif_feat + self._num_context_feat
         if state_matrix.shape != (self._window_size, total_features):
@@ -112,112 +114,101 @@ class RLAgent:
         # Expand dims from [window, num_features] to [batch_size=1, window, num_features]
         motif_input = np.expand_dims(state_matrix[:, :self._num_motif_feat], axis=0).astype(np.float32)
 
-        # Flatted the context input to [1, window * num_context_features]
-        context_input = state_matrix[:, self._num_motif_feat:].reshape(1, -1).astype(np.float32)
+        # Flatted the context input and combine with post_t
+        context_flat = state_matrix[:, self._num_motif_feat:].astype(np.float32).reshape(1, -1)
+        prev_pos_arr = np.array([[float(prev_pos)]], dtype=np.float32)
+        context_input = np.concatenate([context_flat, prev_pos_arr], axis=1)
 
         return {'motif_input': motif_input, 'context_input': context_input}
     
-    def get_q_values(self, state_matrix: np.ndarray) -> np.ndarray:
+    def get_q_values(self, state_matrix: np.ndarray, prev_pos: int) -> np.ndarray:
         # Predict q values through DQN
-        model_input = self._get_states(state_matrix)
+        model_input = self._get_states(state_matrix, prev_pos)
         q_values = self._model.predict(x=model_input, verbose=0)
 
         return q_values
     
-    def fit_model(self, state_matrix: np.ndarray, target_q: np.ndarray) -> float:
+    def fit_model(self, state_matrix: np.ndarray, prev_pos: int, target_q: np.ndarray) -> float:
         # Compute MSE loss between actual and target q values
-        model_input = self._get_states(state_matrix)
+        model_input = self._get_states(state_matrix, prev_pos)
         loss = self._model.fit(model_input, target_q, epochs=1, verbose=0)    
 
         return loss
 
-    def act(self, state_matrix: np.ndarray) -> int:
+    def act(self, state_matrix: np.ndarray, prev_pos: int) -> int:
+        if prev_pos not in {0, 1}:
+            raise ValueError(f'Invalid previous position: {prev_pos}')
+        
         # Defines an epsilon-greedy behaviour policy
         # Pick random action epsilon times
         if not self._test_mode and np.random.random() < self._epsilon:
             return np.random.randint(self._action_size)
 
         # Pick action from DQN 1-epsilon times
-        q_values = self.get_q_values(state_matrix)
+        q_values = self.get_q_values(state_matrix, prev_pos)
         return int(np.argmax(q_values))
 
-    def exp_replay(self, batch_size: int) -> None:
+    def exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
-            return []
+            return 0.0
 
-        # Derive batch from memory and shuffle
-        memory_size = len(self._memory)
-        idx = np.random.permutation(np.arange(memory_size - batch_size, memory_size))
+        # Prefer uniform sampling over entire buffer (stability)
+        idx = np.random.choice(len(self._memory), size=batch_size, replace=False)
         batch = [self._memory[i] for i in idx]
 
-        # Pre-allocate arrays for simplicity
-        B = batch_size
-        W = self._window_size
-        M = self._num_motif_feat
-        C = self._num_context_feat
-
+        B, W, M, C = batch_size, self._window_size, self._num_motif_feat, self._num_context_feat
         motif_batch = np.empty((B, W, M), dtype=np.float32)
-        context_batch = np.empty((B, W * C), dtype=np.float32)
+        context_batch = np.empty((B, W*C + 1), dtype=np.float32)
         next_motif_batch = np.empty((B, W, M), dtype=np.float32)
-        next_context_batch = np.empty((B, W * C), dtype=np.float32)
-
+        next_context_batch = np.empty((B, W*C + 1), dtype=np.float32)
         actions = np.empty((B,), dtype=np.int32)
         rewards = np.empty((B,), dtype=np.float32)
         dones = np.empty((B,), dtype=np.float32)
 
-        # Build batched tensors from transitions
-        for i, (state, action, reward, next_state, done) in enumerate(batch):
-            # split motif / context for current state
-            motif_state = state[:, :M]
-            context_state = state[:, M:]
-            motif_batch[i] = motif_state
-            context_batch[i] = context_state.reshape(-1)
+        for i, (state, prev_pos, action, reward, next_state, next_prev_pos, done) in enumerate(batch):
+            # Extract state components for feeding to DQN braches
+            motif = state[:, :M].astype(np.float32)
+            ctx = state[:, M:].astype(np.float32).reshape(-1)
+            motif_batch[i] = motif
+            context_batch[i] = np.concatenate([ctx, np.array([prev_pos], dtype=np.float32)], axis=0)
 
-            # split motif / context for next state
-            # Note: if None, reuse current & mark done. Although not possible
+            # If no next_state, set done flag to True
             if next_state is None:
-                next_motif_batch[i] = motif_state
-                next_context_batch[i] = context_state.reshape(-1)
+                next_motif_batch[i] = motif
+                next_context_batch[i] = context_batch[i]
                 dones[i] = 1.0
             else:
-                next_motif_state = next_state[:, :M]
-                next_context_state = next_state[:, M:]
-                next_motif_batch[i] = next_motif_state
-                next_context_batch[i] = next_context_state.reshape(-1)
+                next_motif = next_state[:, :M].astype(np.float32)
+                next_ctx   = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
+                next_motif_batch[i]   = next_motif
+                next_context_batch[i] = np.concatenate([next_ctx, np.array([next_prev_pos], dtype=np.float32)], axis=0)
                 dones[i] = 1.0 if done else 0.0
 
             actions[i] = action
             rewards[i] = reward
 
-        # Forward passes on the whole batch. q_current: [B, A]
-        q_current = self._model.predict(
-            {"motif_input": motif_batch, "context_input": context_batch},
-            verbose=0)
+        q_current = self._model.predict({"motif_input": motif_batch, "context_input": context_batch}, verbose=0)
+        q_next_online = self._model.predict({"motif_input": next_motif_batch, "context_input": next_context_batch}, verbose=0)
+        q_next_target = self._target_model.predict({"motif_input": next_motif_batch, "context_input": next_context_batch}, verbose=0)
 
-        # Use target model to stabilize learning. q_next: [B, A]
-        q_next = self._target_model.predict(
-            {"motif_input": next_motif_batch, "context_input": next_context_batch},
-            verbose=0)
-
-        # Use Bellman equation to compute targets for our q_current
-        max_q_next = np.max(q_next, axis=1).astype(np.float32)  # [B]
+        # Compute and update to the ideal or target q table
+        # Note: use online table to get max action for next state
+        # Then, use the target table q value for that next state and max action
+        a_star = np.argmax(q_next_online, axis=1)
+        max_q_next = q_next_target[np.arange(B), a_star].astype(np.float32)
+        
+        returns = rewards + (1.0 - dones) * (self._gamma * max_q_next)
         targets = q_current.copy()
-        targets[:, actions] = rewards + (1.0 - dones) * (self._gamma * max_q_next)
+        targets[np.arange(B), actions] = returns
 
-        # Train the model on the whole batch
-        loss = self._model.train_on_batch(
-            {"motif_input": motif_batch, "context_input": context_batch},
-            targets)
-
-        # Update target network using polyak update
+        loss = self._model.train_on_batch({"motif_input": motif_batch, "context_input": context_batch}, targets)
         self.update_target_network(tau=0.005)
 
-        # epsilon decay (outside GPU path)
         if self._epsilon > self._epsilon_min and not self._test_mode:
             self._epsilon *= self._epsilon_decay
-        
-        # Keras returns the scaler loss
+
         return float(loss)
+
 
     @staticmethod
     def calculate_reward(prev_pos: int, action: int, curr_price: float, next_price: float) -> tuple[float, int]:
@@ -257,6 +248,9 @@ class RLAgent:
             # Running training-loss accumulator within the current group
             train_loss_accum_group = 0.0
 
+            # Track env steps
+            env_steps = 0
+            
             # Iterate tickers, training sequentially
             group_tickers = []
             for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
@@ -273,7 +267,7 @@ class RLAgent:
 
                 for t in range(t0, L - 1):
                     # Find action based on behaviour policy
-                    action = self.act(state)
+                    action = self.act(state, prev_pos)
 
                     curr_price = float(state_loader.get_state_OHLCV('train', e, ticker, t)[3])
                     next_price = float(state_loader.get_state_OHLCV('train', e, ticker, t + 1)[3])
@@ -284,14 +278,19 @@ class RLAgent:
                     done = (t == L - 2)
 
                     # store transition
-                    self._memory.append((state, action, reward, next_state, done))
+                    self._memory.append((state, prev_pos, action, reward, next_state, pos_t, done))
 
+                    # Update env steps taken
+                    env_steps += 1
+                    
                     # train from replay if enough samples; accumulate training loss for this group
-                    if len(self._memory) >= config['batch_size']:
-                        loss = self.exp_replay(config['batch_size'])
-                        train_loss_accum_group += loss
-
-                    # advance
+                    if len(self._memory) >= config.get('replay_start_size', 5000) \
+                        and env_steps % config.get('train_interval', 1) == 0:
+                        for _ in range(config.get('gradient_step_repeat', 1)):
+                            loss = self.exp_replay(config.get('batch_size', 256))
+                            train_loss_accum_group += loss
+                    
+                    # Advance to the next state
                     state = next_state
                     prev_pos = pos_t
 
@@ -340,7 +339,7 @@ class RLAgent:
         return logs_by_episode
 
 
-    def _run_validation_group(self, esl: EpisodeStateLoader, episode_id: int, tickers: list[str], split: str = 'validate'):
+    def _run_validation_group(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str], split: str = 'validate'):
         # switch to test mode for validation
         prev_test_mode = self._test_mode
         self._test_mode = True
@@ -351,19 +350,19 @@ class RLAgent:
         losses = 0
 
         for ticker in tickers:
-            L = esl.get_episode_len(split, episode_id, ticker)
+            L = state_loader.get_episode_len(split, episode_id, ticker)
             if L < self._window_size + 1:
                 continue
 
             t0 = self._window_size - 1
-            state = esl.get_state_matrix(split, episode_id, ticker, t0, self._window_size)
+            state = state_loader.get_state_matrix(split, episode_id, ticker, t0, self._window_size)
             prev_pos = 0
             entry_price = None
 
             for t in range(t0, L - 1):
-                action = self.act(state)
-                curr_price   = float(esl.get_state_OHLCV(split, episode_id, ticker, t)[3])
-                next_price = float(esl.get_state_OHLCV(split, episode_id, ticker, t + 1)[3])
+                action = self.act(state, prev_pos)
+                curr_price = float(state_loader.get_state_OHLCV(split, episode_id, ticker, t)[3])
+                next_price = float(state_loader.get_state_OHLCV(split, episode_id, ticker, t + 1)[3])
 
                 r_t, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_price, next_price)
                 total_reward += r_t
@@ -380,8 +379,11 @@ class RLAgent:
                         losses += 1
                     entry_price = None
 
-                next_state = esl.get_state_matrix(split, episode_id, ticker, t + 1, self._window_size)
-                state, prev_pos = next_state, pos_t
+                next_state = state_loader.get_state_matrix(split, episode_id, ticker, t + 1, self._window_size)
+                
+                # Advance to the next state
+                state =  next_state
+                prev_pos = pos_t
 
         self._test_mode = prev_test_mode
 

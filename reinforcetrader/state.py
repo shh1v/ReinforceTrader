@@ -82,7 +82,7 @@ class EpisodeStateLoader:
                 return len(self._test_features[(episode_id, ticker)])
             case _:
                 raise ValueError(f"Invalid episode type: {episode_type}")
-
+    
     def get_state_matrix(self, episode_type: str, episode_id: int, ticker: str, end_index: int, window_size: int):
         # Get the respective feature data for the episode type
         match episode_type:

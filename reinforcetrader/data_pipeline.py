@@ -22,10 +22,10 @@ class RawDataLoader:
         elif not tickers and not index:
             raise ValueError('Either tickers or index must be provided.')
         
-        # If tickers are provided, do load them from cache
+        # If tickers are provided, do not load them from cache
         load_from_cache = False
                 
-        # Fetch all the tickers in index if tickers are not provided
+        # Fetch all the tickers in index if specific tickers are not provided
         if not tickers:
             # Prefer loading from cache to avoid API calls
             load_from_cache = True
@@ -36,17 +36,21 @@ class RawDataLoader:
             
     def _fetch_tickers(self, index: str='DJI') -> list:
         if index == 'DJI':
-            table_link = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
-            table_idx = 2
+            url = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
         elif index == 'SP500':
-            table_link = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            table_idx = 0
+            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         else:
             raise ValueError('Invalid index: {index}')
         
-        # Fetch the S&P 500 tickers list from wikipedia
-        ticker_table = pd.read_html(table_link)[table_idx]
-
+        # Fetch the Index tables from wikipedia (one of them should be list of tickers)
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; ReinforceTrader/1.0)"}
+        tables = pd.read_html(url, storage_options=headers)
+        
+        # Find the table with a 'Symbol' column (which is usually the list of tickers)
+        ticker_table = next((table for table in tables if 'Symbol' in table.columns), None)
+        if ticker_table is None:
+            raise ValueError('Couldn\'t find a table with a \'Symbol\' column on the page.')
+        
         # Get ticker names and exclude class B shares
         tickers = [ticker for ticker in ticker_table['Symbol'] if '.B' not in ticker]
     
@@ -64,8 +68,9 @@ class RawDataLoader:
         data = data.drop(columns=tickers_to_drop, level=0)
         columns_left = data.columns.get_level_values('Ticker').nunique()
         print(f'Dropped {len(tickers_to_drop)} tickers. {columns_left} tickers left.')
+        print(f"Tickers dropped: {', '.join(tickers_to_drop)}")
 
-        return data 
+        return data
 
 
     def _download_hist_prices(self, tickers: list, save: bool, save_path=None) -> pd.DataFrame:
@@ -137,17 +142,26 @@ class FeatureBuilder:
 
         return True
 
+    
+    def _norm(self, feature_data: pd.Series, window=126) -> pd.Series:
+        mean = feature_data.rolling(window=window).mean()
+        std = feature_data.rolling(window=window).std()
+        return (feature_data - mean) / (std + 1e-12)
+    
     def build_features(self, save=True):
         # Get tickers symbols
         tickers = self._hist_prices.columns.get_level_values('Ticker').unique()
 
         # Predefine feature names
+        # Include OHLCV for reward fn, portfolio managment, and more
         OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
-        price_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL']
+        # Include motif feature to identify candlestick patterns
+        motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL']
+        # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
         technical_f = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
-        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + price_f + technical_f],
+        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + motif_f + technical_f],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._hist_prices.index, columns=feature_columns, dtype=float)
 
@@ -164,23 +178,26 @@ class FeatureBuilder:
             self._features_data.loc[:, (ticker, 'Low')] = low
             self._features_data.loc[:, (ticker, 'Close')] = close
             self._features_data.loc[:, (ticker, 'Volume')] = volume
-
+            
+            # Use eps to avoid division by zero
+            eps = 1e-12
+            
             # Compute the candle body features
             # Body relative to total range, clip for stability
-            candle_range = (high - low).replace(0, 1e-12)
+            candle_range = (high - low).replace(0, eps)
             self._features_data.loc[:, (ticker, 'Body/HL')] = (
                 (close - open) / candle_range
-            ).clip(-1, 1)
+            ).clip(-1.0, 1.0)
 
             # Upper shadow relative to range
             self._features_data.loc[:, (ticker, 'UShadow/HL')] = (
                     (high - np.maximum(open, close)) / candle_range
-            ).clip(lower=0)
+            ).clip(0.0, 1.0)
 
             # Lower shadow relative to range
             self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
                 (np.minimum(open, close) - low) / candle_range
-            ).clip(lower=0)
+            ).clip(0.0, 1.0)
 
             # Compute rolling Exponential Moving Averages: 5, 13, 26
             ema5 = EMAIndicator(close=close, window=5).ema_indicator()
@@ -188,9 +205,9 @@ class FeatureBuilder:
             ema26 = EMAIndicator(close=close, window=26).ema_indicator()
 
             # Compute the EMA ratios
-            self._features_data.loc[:, (ticker, 'C/EMA5')] = (close / ema5) - 1
-            self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = (ema5 / ema13) - 1
-            self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = (ema13 / ema26) - 1
+            self._features_data.loc[:, (ticker, 'C/EMA5')] = self._norm((close / ema5) - 1)
+            self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = self._norm((ema5 / ema13) - 1)
+            self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = self._norm((ema13 / ema26) - 1)
 
             # Compute Bollinger Bands (%B and Bandwidth)
             bb = BollingerBands(close, window=20, window_dev=2)
@@ -198,8 +215,8 @@ class FeatureBuilder:
             bb_upper = bb.bollinger_hband()
             bb_lower = bb.bollinger_lband()
             bb_width = bb_upper - bb_lower
-            self._features_data.loc[:, (ticker, 'B%B')] = ((close - bb_lower) / bb_width)
-            self._features_data.loc[:, (ticker, 'BBW')] = bb_width / bb_sma20
+            self._features_data.loc[:, (ticker, 'B%B')] = (close - bb_lower) / (bb_width + eps)
+            self._features_data.loc[:, (ticker, 'BBW')] = self._norm(bb_width / (bb_sma20 + eps))
 
             # Compute Relative Strength Index (RSI) scaled bw [-1, 1]
             rsi = RSIIndicator(close, window=14).rsi()
@@ -211,7 +228,7 @@ class FeatureBuilder:
 
             # Compute ratio of current volume over 20 volume moving average
             vol20 = volume.rolling(20, min_periods=20).mean()
-            self._features_data.loc[:, (ticker, 'V/Vol20')] = volume / vol20
+            self._features_data.loc[:, (ticker, 'V/Vol20')] = self._norm(volume / (vol20 + eps))
         
         # Drop all rows with NaN values
         self._features_data = self._features_data.dropna()
