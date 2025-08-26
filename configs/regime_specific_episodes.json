@@ -1,0 +1,83 @@
+{
+  "universe": "SP500",
+  "notes": {
+    "date_format": "YYYY-MM-DD",
+    "start_date": "1999-12-01",
+    "end_date": "2025-08-11",
+    "comment": "All episodes except the last one are used for training and validation, while the last one is reserved for testing."
+  },
+  "episodes": [
+    {
+      "type": "train",
+      "episode_id": 1,
+      "name": "Dot-com bust",
+      "regime": "bear",
+      "start_date": "2000-03-20",
+      "end_date": "2002-07-22",
+      "description": "Bursting of the late-1990s internet stock bubble after years of speculative IPOs and easy capital. Tightening financial conditions and a 2001 recession, compounded by the 9/11 shock, drove multi-year declines centered in tech."
+    },
+    {
+      "type": "train",
+      "episode_id": 2,
+      "name": "Post-bust base",
+      "regime": "sideways",
+      "start_date": "2002-07-23",
+      "end_date": "2003-05-27",
+      "description": "Hesitant stabilization after heavy selling. Choppy, range-bound price action as markets gauged whether the worst was over."
+    },
+    {
+      "type": "train",
+      "episode_id": 3,
+      "name": "Credit and housing expansion",
+      "regime": "bull",
+      "start_date": "2003-05-28",
+      "end_date": "2007-10-08",
+      "description": "Recovery supported by low rates and ample liquidity, strong credit growth, housing boom, and rising corporate earnings. Financials benefited from mortgage origination and securitization, which sowed later systemic risk."
+    },
+    {
+      "type": "train",
+      "episode_id": 4,
+      "name": "Global Financial Crisis",
+      "regime": "bear",
+      "start_date": "2007-10-09",
+      "end_date": "2009-03-02",
+      "description": "Subprime defaults and collapsing mortgage-backed securities triggered institutional failures, a credit freeze, and a deep recession until extraordinary policy support began to stabilize conditions."
+    },
+    {
+      "type": "train",
+      "episode_id": 5,
+      "name": "Post-GFC recovery",
+      "regime": "bull",
+      "start_date": "2009-03-03",
+      "end_date": "2014-10-13",
+      "description": "Near-zero rates and successive rounds of quantitative easing supported risk assets while profits recovered. Notable shocks included the May 2010 flash crash and the 2011 U.S. credit-rating downgrade during Europe’s debt crisis, but the broader trend was upward."
+    },
+    {
+      "type": "train",
+      "episode_id": 6,
+      "name": "QE exit and global growth scare",
+      "regime": "sideways",
+      "start_date": "2014-10-14",
+      "end_date": "2016-11-14",
+      "description": "Consolidation as the Fed ended QE3 and prepared for hikes. A major oil price collapse hit energy earnings, China’s 2015 yuan devaluation and growth concerns spurred volatility, and Brexit uncertainty added to risk."
+    },
+    {
+      "type": "train",
+      "episode_id": 7,
+      "name": "Policy-fueled expansion",
+      "regime": "bull",
+      "start_date": "2016-11-15",
+      "end_date": "2019-12-09",
+      "description": "Rally on expectations of tax cuts, deregulation, and solid earnings. Corporate tax reform in 2017 reduced the statutory rate and supported profits. A near-bear correction occurred in Q4 2018 amid Fed tightening and U.S–China trade tensions, followed by a 2019 rebound as the Fed pivoted."
+    },
+    {
+      "type": "test",
+      "episode_id": 1,
+      "name": "Mixed: COVID shock, rebound, inflation tightening",
+      "regime": "mixed",
+      "start_date": "2019-12-10",
+      "end_date": "2025-08-11",
+      "description": "Includes the Feb–Mar 2020 COVID crash and extraordinary monetary support, the rapid post-COVID bull, then the inflation and aggressive Fed-hike period that produced a sideways phase roughly from early 2022 to April 2023, followed by recovery."
+    }
+  ]
+}
