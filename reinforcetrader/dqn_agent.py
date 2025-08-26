@@ -1,5 +1,7 @@
 import os
+import json
 import numpy as np
+from datetime import datetime
 import matplotlib.pyplot as plt
 
 from typing import Any
@@ -233,33 +235,26 @@ class RLAgent:
         # Make req. directories if not exist
         os.makedirs(train_config['model_dir'], exist_ok=True)
         os.makedirs(train_config['plots_dir'], exist_ok=True)
+        os.makedirs(train_config['logs_dir'], exist_ok=True)
 
         logs_by_episode = {}
 
         tickers_all = state_loader.get_all_tickers()
 
         for e in episode_ids:
-            # Per-episode per-group stores of training performance
-            # list of train loss (floats), one per group
-            group_train_losses = []
-            # list of validation results (dict), one per group
-            group_val_results = []
-            # string labels showing which tickers were in the group
-            group_labels = []
 
-            # Running training-loss accumulator within the current group
-            train_loss_accum_group = 0.0
+            # Compute the total loss across the whole episode
+            train_loss = 0.0
 
             # Track env steps
             env_steps = 0
             
             # Iterate tickers, training sequentially
-            group_tickers = []
             for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
                 L = state_loader.get_episode_len('train', e, ticker)
                 if L < self._window_size + 1:
                     # skip tickers that don't have enough data for a window and next step
-                    # Not the case for the regime episode configuration file
+                    # Not the case for the current episode configuration file
                     continue
 
                 # Train on this ticker for the episode (standard rollout with replay)
@@ -287,65 +282,53 @@ class RLAgent:
                     
                     # train from replay if enough samples; accumulate training loss for this group
                     if len(self._memory) >= train_config.get('replay_start_size', 5000):
+                        # Train every train_interval steps
                         if env_steps % train_config.get('train_interval', 1) == 0:
                             for _ in range(train_config.get('gradient_step_repeat', 1)):
                                 loss = self.exp_replay(train_config.get('batch_size', 256))
-                                train_loss_accum_group += loss
+                                train_loss += loss
                                 
-                            # Decay epsilon slowly until min
-                            if self._epsilon > self._epsilon_min and not self._test_mode:
-                                self._epsilon *= self._epsilon_decay 
+                                # Decay epsilon slowly until min
+                                if self._epsilon > self._epsilon_min and not self._test_mode:
+                                    self._epsilon *= self._epsilon_decay 
                     
                     # Advance to the next state
                     state = next_state
                     prev_pos = pos_t
 
-                # add ticker to current group
-                group_tickers.append(ticker)
-
-                # If we've finished a group of tickers (val_group_size), run group validation
-                if len(group_tickers) == train_config['val_group_size']:
-                    # Validation on the same episode, only over these group tickers
-                    val_stats = self._run_validation_group(state_loader, e, group_tickers, split='validate')
-
-                    # Record
-                    group_train_losses.append(train_loss_accum_group)
-                    group_val_results.append(val_stats)
-                    group_labels.append([",".join(group_tickers)])
-
-                    # Reset for next group
-                    train_loss_accum_group = 0.0
-                    group_tickers = []
-
-            # If there are leftover tickers in the last partial group, validate them too
-            if len(group_tickers) > 0:
-                val_stats = self._run_validation_group(state_loader, e, group_tickers, split='validate')
-                group_train_losses.append(train_loss_accum_group)
-                group_val_results.append(val_stats)
-                group_labels.append([",".join(group_tickers)])
-                train_loss_accum_group = 0.0
-                group_tickers = []
-
-            # End of episode: plot one figure (training vs validation loss over groups)
-            fig_path = os.path.join(train_config['plots_dir'], f"ep{e}_group_losses.png")
-            group_val_losses = [-d['sum_reward'] for d in group_val_results]
-            self._plot_group_losses(group_train_losses, group_val_losses, fig_path)
-
-            # Save model checkpoint
-            self._model.save(os.path.join(train_config['model_dir'], f"model_ep{e}.keras"))
-
-            # Save logs for this episode
+            # Run validation on this episode's validation set
+            val_results = self._run_validation(state_loader, e, tickers_all)
+            val_loss = -val_results['sum_reward']
+            print(f"Episode {e} summary: Train loss: {train_loss:.4f}, Val loss: {val_loss:.4f}, Total val trades: {val_results['total_trades']}, Hit rate: {val_results['hit_rate']:.3f}")
+            
+            # Store logs for this episode
             logs_by_episode[e] = {
-                "group_train_losses": group_train_losses,
-                "group_val_results": group_val_results,
-                "group_labels": group_labels,
-                "figure": fig_path,
+                "train_loss": train_loss,
+                "val_results": val_results,
+                "epsilon": self._epsilon
             }
+            
+        # Plot all the training and validation losses
+        train_losses = [logs_by_episode[ep]["train_loss"] for ep in episode_ids]
+        val_losses = [-logs_by_episode[ep]["val_results"]["sum_reward"] for ep in episode_ids]
+        self._plot_losses(train_losses, val_losses, fname=os.path.join(train_config['plots_dir'], 'train_losses.png'))
+        
+        # Also plot the epsilon decay
+        epsilons = [logs_by_episode[ep]["epsilon"] for ep in episode_ids] 
+        self._plot_epsilon_decay(epsilons, fname=os.path.join(train_config['plots_dir'], 'epsilon_decay.png'))
+        
+        # Save model checkpoint with the current date and time
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._model.save(os.path.join(train_config['model_dir'], f"model_{date_str}.keras"))
+        
+        # Save logs to a json file
+        with open(os.path.join(train_config['logs_dir'], f"train_logs_{date_str}.json"), 'w') as f:
+            json.dump(logs_by_episode, f, indent=2)
 
         return logs_by_episode
 
 
-    def _run_validation_group(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str], split: str = 'validate'):
+    def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]):
         # switch to test mode for validation
         prev_test_mode = self._test_mode
         self._test_mode = True
@@ -356,19 +339,19 @@ class RLAgent:
         losses = 0
 
         for ticker in tickers:
-            L = state_loader.get_episode_len(split, episode_id, ticker)
+            L = state_loader.get_episode_len('validate', episode_id, ticker)
             if L < self._window_size + 1:
                 continue
 
             t0 = self._window_size - 1
-            state = state_loader.get_state_matrix(split, episode_id, ticker, t0, self._window_size)
+            state = state_loader.get_state_matrix('validate', episode_id, ticker, t0, self._window_size)
             prev_pos = 0
             entry_price = None
 
             for t in range(t0, L - 1):
                 action = self.act(state, prev_pos)
-                curr_price = float(state_loader.get_state_OHLCV(split, episode_id, ticker, t)[3])
-                next_price = float(state_loader.get_state_OHLCV(split, episode_id, ticker, t + 1)[3])
+                curr_price = float(state_loader.get_state_OHLCV('validate', episode_id, ticker, t)[3])
+                next_price = float(state_loader.get_state_OHLCV('validate', episode_id, ticker, t + 1)[3])
 
                 r_t, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_price, next_price)
                 total_reward += r_t
@@ -385,7 +368,7 @@ class RLAgent:
                         losses += 1
                     entry_price = None
 
-                next_state = state_loader.get_state_matrix(split, episode_id, ticker, t + 1, self._window_size)
+                next_state = state_loader.get_state_matrix('validate', episode_id, ticker, t + 1, self._window_size)
                 
                 # Advance to the next state
                 state =  next_state
@@ -396,14 +379,31 @@ class RLAgent:
         hit_rate = wins / max(wins + losses, 1)
         return {
             "episode": episode_id,
-            "split": split,
-            "tickers": tickers,
             "sum_reward": float(total_reward),
             "total_trades": int(total_trades),
             "hit_rate": float(hit_rate),
         }
 
-    def _plot_group_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None, show: bool = True):
+    def _plot_epsilon_decay(self, epsilons: list[float], fname: str | None = None, show: bool = True):
+        x = np.arange(1, len(epsilons) + 1)
+
+        plt.figure(figsize=(8, 4))
+        plt.plot(x, epsilons, marker='o', linewidth=2, color='tab:blue')
+        plt.xlabel('Episode')
+        plt.ylabel('Epsilon')
+        plt.title('Epsilon Decay over Episodes')
+        plt.grid(True, linestyle='--', alpha=0.3)
+
+        if fname:
+            os.makedirs(os.path.dirname(fname), exist_ok=True)
+            plt.savefig(fname, dpi=150)
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+    
+    def _plot_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None, show: bool = True):
 
         x = np.arange(1, len(train_losses) + 1)
 
@@ -411,8 +411,8 @@ class RLAgent:
 
         # Left axis: training loss
         ax1.plot(x, train_losses, marker='o', linewidth=2, color='tab:blue',
-                label='Train loss (sum per group)')
-        ax1.set_xlabel('Ticker group index')
+                label='Train loss (MSE per episode)')
+        ax1.set_xlabel('Episode')
         ax1.set_ylabel('Train loss', color='tab:blue')
         ax1.tick_params(axis='y', labelcolor='tab:blue')
         ax1.grid(True, linestyle='--', alpha=0.3)
@@ -420,7 +420,7 @@ class RLAgent:
         # Right axis: validation loss
         ax2 = ax1.twinx()
         ax2.plot(x, val_losses, marker='s', linewidth=2, color='tab:orange',
-                label='Validation loss (−sum reward)')
+                label='Validation loss (−sum reward per episode)')
         ax2.set_ylabel('Validation loss', color='tab:orange')
         ax2.tick_params(axis='y', labelcolor='tab:orange')
 
@@ -432,7 +432,7 @@ class RLAgent:
             labels.extend(lab)
         ax1.legend(lines, labels, loc='best')
 
-        plt.title('Group losses over training (per episode)')
+        plt.title('Training Vs. Validation Loss per Episode')
         fig.tight_layout()
 
         if fname:
@@ -442,4 +442,4 @@ class RLAgent:
         if show:
             plt.show()
         else:
-            plt.close(fig)
+            plt.close()
