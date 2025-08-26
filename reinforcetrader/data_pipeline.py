@@ -142,6 +142,12 @@ class FeatureBuilder:
 
         return True
 
+    
+    def _norm(self, feature_data: pd.Series, window=126) -> pd.Series:
+        mean = feature_data.rolling(window=window).mean()
+        std = feature_data.rolling(window=window).std()
+        return (feature_data - mean) / (std + 1e-12)
+    
     def build_features(self, save=True):
         # Get tickers symbols
         tickers = self._hist_prices.columns.get_level_values('Ticker').unique()
@@ -178,20 +184,20 @@ class FeatureBuilder:
             
             # Compute the candle body features
             # Body relative to total range, clip for stability
-            candle_range = (high - low) + eps
+            candle_range = (high - low).replace(0, eps)
             self._features_data.loc[:, (ticker, 'Body/HL')] = (
                 (close - open) / candle_range
-            ).clip(-1, 1)
+            ).clip(-1.0, 1.0)
 
             # Upper shadow relative to range
             self._features_data.loc[:, (ticker, 'UShadow/HL')] = (
                     (high - np.maximum(open, close)) / candle_range
-            ).clip(lower=0)
+            ).clip(0.0, 1.0)
 
             # Lower shadow relative to range
             self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
                 (np.minimum(open, close) - low) / candle_range
-            ).clip(lower=0)
+            ).clip(0.0, 1.0)
 
             # Compute rolling Exponential Moving Averages: 5, 13, 26
             ema5 = EMAIndicator(close=close, window=5).ema_indicator()
@@ -199,9 +205,9 @@ class FeatureBuilder:
             ema26 = EMAIndicator(close=close, window=26).ema_indicator()
 
             # Compute the EMA ratios
-            self._features_data.loc[:, (ticker, 'C/EMA5')] = (close / ema5) - 1
-            self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = (ema5 / ema13) - 1
-            self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = (ema13 / ema26) - 1
+            self._features_data.loc[:, (ticker, 'C/EMA5')] = self._norm((close / ema5) - 1)
+            self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = self._norm((ema5 / ema13) - 1)
+            self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = self._norm((ema13 / ema26) - 1)
 
             # Compute Bollinger Bands (%B and Bandwidth)
             bb = BollingerBands(close, window=20, window_dev=2)
@@ -210,7 +216,7 @@ class FeatureBuilder:
             bb_lower = bb.bollinger_lband()
             bb_width = bb_upper - bb_lower
             self._features_data.loc[:, (ticker, 'B%B')] = (close - bb_lower) / (bb_width + eps)
-            self._features_data.loc[:, (ticker, 'BBW')] = bb_width / (bb_sma20 + eps)
+            self._features_data.loc[:, (ticker, 'BBW')] = self._norm(bb_width / (bb_sma20 + eps))
 
             # Compute Relative Strength Index (RSI) scaled bw [-1, 1]
             rsi = RSIIndicator(close, window=14).rsi()
@@ -222,7 +228,7 @@ class FeatureBuilder:
 
             # Compute ratio of current volume over 20 volume moving average
             vol20 = volume.rolling(20, min_periods=20).mean()
-            self._features_data.loc[:, (ticker, 'V/Vol20')] = volume / vol20
+            self._features_data.loc[:, (ticker, 'V/Vol20')] = self._norm(volume / (vol20 + eps))
         
         # Drop all rows with NaN values
         self._features_data = self._features_data.dropna()

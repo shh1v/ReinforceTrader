@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 
 from typing import Any
 from tensorflow import keras
-from tensorflow.keras import Input, layers, optimizers
 from collections import deque
 from tqdm import tqdm
 
@@ -249,6 +248,9 @@ class RLAgent:
             # Running training-loss accumulator within the current group
             train_loss_accum_group = 0.0
 
+            # Track env steps
+            env_steps = 0
+            
             # Iterate tickers, training sequentially
             group_tickers = []
             for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
@@ -278,10 +280,15 @@ class RLAgent:
                     # store transition
                     self._memory.append((state, prev_pos, action, reward, next_state, pos_t, done))
 
+                    # Update env steps taken
+                    env_steps += 1
+                    
                     # train from replay if enough samples; accumulate training loss for this group
-                    if len(self._memory) >= config['replay_start_size']:
-                        loss = self.exp_replay(config['batch_size'])
-                        train_loss_accum_group += loss
+                    if len(self._memory) >= config.get('replay_start_size', 5000) \
+                        and env_steps % config.get('train_interval', 1) == 0:
+                        for _ in range(config.get('gradient_step_repeat', 1)):
+                            loss = self.exp_replay(config.get('batch_size', 256))
+                            train_loss_accum_group += loss
                     
                     # Advance to the next state
                     state = next_state
