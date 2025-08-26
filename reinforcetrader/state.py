@@ -12,10 +12,6 @@ class EpisodeStateLoader:
         # Store all tickers symbols for getters function
         self._ticker_symbols = self._features_data.columns.get_level_values('Ticker').unique()
 
-        # Get the index of 'InTrade' column available for every ticker
-        feature_idx = self._features_data.columns.get_level_values('Feature')
-        self._in_trade_idx = np.where(feature_idx == 'InTrade')[0][0]
-
         # Store the OHCLV + states in dicts keyed by (episode_id, ticker) -> np.ndarray [len(ep), F]
         self._train_features: dict[tuple[int, str], np.ndarray] = {}
         self._val_features: dict[tuple[int, str], np.ndarray] = {}
@@ -86,10 +82,6 @@ class EpisodeStateLoader:
                 return len(self._test_features[(episode_id, ticker)])
             case _:
                 raise ValueError(f"Invalid episode type: {episode_type}")
-
-    def update_trade_state(self, episode_type: str, episode_id: int, ticker: str, index: int, InTrade: int) -> None:
-        if InTrade not in {0, 1}:
-            raise ValueError(f"Invalid InTrade value: {InTrade}")
         
         # Update the InTrade state in the feature data for the specified episode and ticker
         match episode_type:

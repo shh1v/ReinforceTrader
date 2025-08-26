@@ -148,15 +148,13 @@ class FeatureBuilder:
         # Predefine feature names
         # Include OHLCV for reward fn, portfolio managment, and more
         OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
-        # InTrade flag, 1 for in-trade, 0 for out-of-trade
-        trade_f = ['InTrade']
         # Include motif feature to identify candlestick patterns
         motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL']
         # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
         technical_f = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
-        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + motif_f + trade_f + technical_f],
+        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + motif_f + technical_f],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._hist_prices.index, columns=feature_columns, dtype=float)
 
@@ -173,9 +171,6 @@ class FeatureBuilder:
             self._features_data.loc[:, (ticker, 'Low')] = low
             self._features_data.loc[:, (ticker, 'Close')] = close
             self._features_data.loc[:, (ticker, 'Volume')] = volume
-
-            # Initlialize in-trade flag to integer 0
-            self._features_data.loc[:, (ticker, 'InTrade')] = 0
             
             # Compute the candle body features
             # Body relative to total range, clip for stability
