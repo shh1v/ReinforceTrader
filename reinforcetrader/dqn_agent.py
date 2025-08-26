@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 from typing import Any
 from tensorflow import keras
+from tensorflow.keras import layers, Input, optimizers
 from collections import deque
 from tqdm import tqdm
 
@@ -12,7 +13,7 @@ from .state import EpisodeStateLoader
 @keras.utils.register_keras_serializable()
 # Define DQN Model Architecture
 class DualBranchDQN(keras.Model):
-    def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int) -> None:
+    def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int, learning_rate: float) -> None:
         super().__init__()
 
         # Motif Branch for finding candle patterns using Conv1D
@@ -35,22 +36,24 @@ class DualBranchDQN(keras.Model):
 
         model_input = {"motif_input": motif_input, "context_input": context_input}
         self._model = keras.Model(inputs=model_input, outputs=Q, name="DualBranchDQN")
-        self._model.compile(loss="mse", optimizer=optimizers.Adam(1e-3, clipnorm=1.0))
+        self._model.compile(loss="mse", optimizer=optimizers.Adam(learning_rate, clipnorm=1.0))
 
     def get_model(self):
         return self._model
 
 class RLAgent:
-    def __init__(self, window_size: int, num_features: tuple[int, int], test_mode: int=False, model_name: str='') -> None:
+    def __init__(self, agent_config, test_mode: int=False, model_name: str='') -> None:
         # Store state and action representation configurations
-        self._window_size = window_size
-        self._num_motif_feat, self._num_context_feat = num_features
+        self._window_size = agent_config['state_matrix_window']
+        self._num_motif_feat = agent_config['num_motif_features']
+        self._num_context_feat = agent_config['num_context_features']
         
         # Hold: 0, Buy: 1, Sell: 2
         self._action_size = 3
 
         # Define memory to store (state, action, reward, new_state) pairs for exp. replay
-        self._memory = deque(maxlen=100000)
+        buffer_length = agent_config.get('memory_buffer_len', 10000)
+        self._memory = deque(maxlen=buffer_length)
 
         # Define inventory to hold trades
         self._inventory = []
@@ -59,13 +62,15 @@ class RLAgent:
         self._model_name = model_name
 
         # Define parameters for behaviour policy and temporal learning
-        self._gamma = 0.95
-        self._epsilon = 1.0
-        self._epsilon_min = 0.01
-        self._epsilon_decay = 0.995
+        self._gamma = agent_config.get('gamma', 0.95)  # discount factor
+        self._epsilon = agent_config.get('epsilon_start', 1.0)
+        self._epsilon_min = agent_config.get('epsilon_min', 0.01)
+        n_updates = agent_config.get('decay_updates', 25000) # No. of updates to minimum epsilon
+        self._epsilon_decay = (self._epsilon_min / self._epsilon) ** (1.0 / n_updates)
 
         # Load model or define new
-        self._model = keras.models.load_model(model_name) if self._test_mode else self._init_model()
+        learning_rate = agent_config.get('learning_rate', 1e-3)
+        self._model = keras.models.load_model(model_name) if self._test_mode else self._init_model(learning_rate)
         
         # Init target network update and frequency
         self._init_target_network()
@@ -73,14 +78,14 @@ class RLAgent:
     def get_model(self) -> keras.Model:
         return self._model
 
-    def _init_model(self) -> keras.Model:
+    def _init_model(self, learning_rate) -> keras.Model:
         # Compute state shapes for the model
         motif_shape = (self._window_size, self._num_motif_feat)
         # Note: Add 1 to include the pos_t flag
         context_size = self._window_size * self._num_context_feat + 1
 
         # Init model
-        dual_dqn = DualBranchDQN(motif_shape, context_size, self._action_size)
+        dual_dqn = DualBranchDQN(motif_shape, context_size, self._action_size, learning_rate)
 
         return dual_dqn.get_model()
 
@@ -204,9 +209,6 @@ class RLAgent:
         loss = self._model.train_on_batch({"motif_input": motif_batch, "context_input": context_batch}, targets)
         self.update_target_network(tau=0.005)
 
-        if self._epsilon > self._epsilon_min and not self._test_mode:
-            self._epsilon *= self._epsilon_decay
-
         return float(loss)
 
 
@@ -227,10 +229,10 @@ class RLAgent:
         reward = pos_t * log_ret - trade_cost
         return reward, pos_t
     
-    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], config: dict[str, Any]) -> dict[str, Any]:
+    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any]) -> dict[str, Any]:
         # Make req. directories if not exist
-        os.makedirs(config['model_dir'], exist_ok=True)
-        os.makedirs(config['plots_dir'], exist_ok=True)
+        os.makedirs(train_config['model_dir'], exist_ok=True)
+        os.makedirs(train_config['plots_dir'], exist_ok=True)
 
         logs_by_episode = {}
 
@@ -284,11 +286,15 @@ class RLAgent:
                     env_steps += 1
                     
                     # train from replay if enough samples; accumulate training loss for this group
-                    if len(self._memory) >= config.get('replay_start_size', 5000) \
-                        and env_steps % config.get('train_interval', 1) == 0:
-                        for _ in range(config.get('gradient_step_repeat', 1)):
-                            loss = self.exp_replay(config.get('batch_size', 256))
-                            train_loss_accum_group += loss
+                    if len(self._memory) >= train_config.get('replay_start_size', 5000):
+                        if env_steps % train_config.get('train_interval', 1) == 0:
+                            for _ in range(train_config.get('gradient_step_repeat', 1)):
+                                loss = self.exp_replay(train_config.get('batch_size', 256))
+                                train_loss_accum_group += loss
+                                
+                            # Decay epsilon slowly until min
+                            if self._epsilon > self._epsilon_min and not self._test_mode:
+                                self._epsilon *= self._epsilon_decay 
                     
                     # Advance to the next state
                     state = next_state
@@ -298,7 +304,7 @@ class RLAgent:
                 group_tickers.append(ticker)
 
                 # If we've finished a group of tickers (val_group_size), run group validation
-                if len(group_tickers) == config['val_group_size']:
+                if len(group_tickers) == train_config['val_group_size']:
                     # Validation on the same episode, only over these group tickers
                     val_stats = self._run_validation_group(state_loader, e, group_tickers, split='validate')
 
@@ -321,12 +327,12 @@ class RLAgent:
                 group_tickers = []
 
             # End of episode: plot one figure (training vs validation loss over groups)
-            fig_path = os.path.join(config['plots_dir'], f"ep{e}_group_losses.png")
+            fig_path = os.path.join(train_config['plots_dir'], f"ep{e}_group_losses.png")
             group_val_losses = [-d['sum_reward'] for d in group_val_results]
             self._plot_group_losses(group_train_losses, group_val_losses, fig_path)
 
             # Save model checkpoint
-            self._model.save(os.path.join(config['model_dir'], f"model_ep{e}.keras"))
+            self._model.save(os.path.join(train_config['model_dir'], f"model_ep{e}.keras"))
 
             # Save logs for this episode
             logs_by_episode[e] = {
