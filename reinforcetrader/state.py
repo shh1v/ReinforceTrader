@@ -83,19 +83,21 @@ class EpisodeStateLoader:
             case _:
                 raise ValueError(f"Invalid episode type: {episode_type}")
     
-    def get_state_matrix(self, episode_type: str, episode_id: int, ticker: str, end_index: int, window_size: int):
-        # Get the respective feature data for the episode type
+    def _get_set_features(self, episode_type: str) -> dict[tuple[int, str], np.ndarray]:
         match episode_type:
             case 'train':
-                episode_features = self._train_features
+                return self._train_features
             case 'validate':
-                episode_features = self._val_features
+                return self._val_features
             case 'test':
-                episode_features = self._test_features
+                return self._test_features
             case _:
                 raise ValueError(f"Invalid episode type: {episode_type}")
-
-        episode_ticker_features = episode_features[(episode_id, ticker)]
+    
+    def get_state_matrix(self, episode_type: str, episode_id: int, ticker: str, end_index: int, window_size: int):
+        # Get the respective feature data for the episode type
+        store = self._get_set_features(episode_type)
+        episode_ticker_features = store[(episode_id, ticker)]
 
         # Check if end index is appropriate and state features exist
         T, F = episode_ticker_features.shape
@@ -122,17 +124,8 @@ class EpisodeStateLoader:
     
     def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int):
         # Get the respective feature data for the episode type
-        match episode_type:
-            case 'train':
-                episode_features = self._train_features
-            case 'validate':
-                episode_features = self._val_features
-            case 'test':
-                episode_features = self._test_features
-            case _:
-                raise ValueError(f"Invalid episode type: {episode_type}")
-
-        episode_ticker_features = episode_features[(episode_id, ticker)]
+        store = self._get_set_features(episode_type)
+        episode_ticker_features = store[(episode_id, ticker)]
 
         # Check if index is in episode bounds
         T = episode_ticker_features.shape[0]
@@ -141,3 +134,24 @@ class EpisodeStateLoader:
 
         # Slice features (skip first 5 columns)
         return episode_ticker_features[index, :5]
+    
+    def get_test_dates(self, episode_id: int, ticker: str) -> pd.DatetimeIndex:
+        # find the test episode config
+        ep_cfg = next(
+            ep for ep in self._episode_config["episodes"]
+            if int(ep["episode_id"]) == int(episode_id) and ep["type"] == "test"
+        )
+        start = pd.Timestamp(ep_cfg["start_date"])
+        end   = pd.Timestamp(ep_cfg["end_date"])
+
+        # full date slice in the features DataFrame
+        full_idx = self._features_data.loc[start:end].index
+
+        # trim to stored length (in case of dropna/padding during feature build)
+        L = self._test_features[(episode_id, ticker)].shape[0]
+        
+        if len(full_idx) < L:
+            # fall back to last L rows from available
+            return pd.DatetimeIndex(pd.to_datetime(full_idx[-L:]))
+        
+        return pd.DatetimeIndex(pd.to_datetime(full_idx[:L]))

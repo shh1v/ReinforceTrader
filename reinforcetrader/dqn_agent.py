@@ -1,7 +1,12 @@
 import os
+
+# Suppress TensorFlow logging for cleaner output
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+
 import json
 import numpy as np
 from datetime import datetime
+import pandas as pd
 import matplotlib.pyplot as plt
 
 from typing import Any
@@ -443,3 +448,98 @@ class RLAgent:
             plt.show()
         else:
             plt.close()
+
+    def _action_to_onehot(self, a: int) -> dict:
+        # 0: hold, 1: buy, 2: sell
+        return {
+            "buy":  1 if a == 1 else 0,
+            "sell": 1 if a == 2 else 0,
+            "hold": 1 if a == 0 else 0,
+        }
+
+    def test(self, state_loader: EpisodeStateLoader, episode_ids: list[int], test_config: dict[str, Any]):
+        # ensure pure evaluation
+        prev_test_mode = self._test_mode
+        self._test_mode = True
+
+        tickers_all = state_loader.get_all_tickers()
+
+        # Keep a single ordered list of keys and parallel lists of series for safe alignment
+        col_keys = [] # [(Episode, Ticker), ...] in deterministic order
+        sig_series_list = [] # [Series, ...]
+        px_series_list  = [] # [Series, ...]
+
+        for ep in episode_ids:
+            for ticker in tqdm(tickers_all, desc=f'Testing episode {ep}', ncols=100):
+                L = state_loader.get_episode_len('test', ep, ticker)
+                if L < self._window_size + 1:
+                    continue
+
+                # Aligned date index for this (ep, ticker)
+                idx = state_loader.get_test_dates(ep, ticker)
+
+                # Prepare iteration
+                t0 = self._window_size - 1
+                state = state_loader.get_state_matrix('test', ep, ticker, t0, self._window_size)
+                prev_pos = 0
+
+                # allocate containers (length L to match idx)
+                sig_cells = [None] * L
+                close_px  = np.empty(L, dtype=np.float32)
+
+                # warm-up rows: force hold until we have a full window
+                for t in range(0, t0):
+                    close_px[t] = float(state_loader.get_state_OHLCV('test', ep, ticker, t)[3])
+                    sig_cells[t] = self._action_to_onehot(0)
+
+                # main loop
+                for t in range(t0, L - 1):
+                    curr_close = float(state_loader.get_state_OHLCV('test', ep, ticker, t)[3])
+                    next_close = float(state_loader.get_state_OHLCV('test', ep, ticker, t + 1)[3])
+                    close_px[t] = curr_close
+
+                    action = self.act(state, prev_pos)
+                    sig_cells[t] = self._action_to_onehot(action)
+
+                    _, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_close, next_close)
+                    next_state = state_loader.get_state_matrix('test', ep, ticker, t + 1, self._window_size)
+                    state = next_state
+                    prev_pos = pos_t
+
+                # final row (t = L-1): record price; no new decision possible → force hold
+                close_px[L - 1] = float(state_loader.get_state_OHLCV('test', ep, ticker, L - 1)[3])
+                sig_cells[L - 1] = self._action_to_onehot(0)
+
+                # Stash in ordered lists
+                key = (ep, ticker)
+                col_keys.append(key)
+                sig_series_list.append(pd.Series(sig_cells, index=idx))
+                px_series_list.append(pd.Series(close_px, index=idx))
+
+        # Concatenate into DataFrames with MultiIndex columns
+        if len(sig_series_list) == 0:
+            signals_df = pd.DataFrame()
+            prices_df  = pd.DataFrame()
+        else:
+            columns = pd.MultiIndex.from_tuples(col_keys, names=["Episode", "Ticker"])
+            signals_df = pd.concat(sig_series_list, axis=1)
+            signals_df.columns = columns
+            prices_df = pd.concat(px_series_list, axis=1)
+            prices_df.columns = columns
+
+        # restore mode
+        self._test_mode = prev_test_mode
+
+        # Save artifacts
+        out_dir = test_config.get("outputs_dir")
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            signals_path = os.path.join(out_dir, f"signals_{ts}.pkl")
+            prices_path  = os.path.join(out_dir, f"prices_{ts}.pkl")
+            signals_df.to_pickle(signals_path)
+            prices_df.to_pickle(prices_path)
+            print(f"Saved signals to {signals_path}")
+            print(f"Saved prices  to {prices_path}")
+
+        return signals_df, prices_df
