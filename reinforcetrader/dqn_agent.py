@@ -293,9 +293,9 @@ class RLAgent:
                                 loss = self.exp_replay(train_config.get('batch_size', 256))
                                 train_loss += loss
                                 
-                                # Decay epsilon slowly until min
-                                if self._epsilon > self._epsilon_min and not self._test_mode:
-                                    self._epsilon *= self._epsilon_decay 
+                            # Decay epsilon slowly until min
+                            if self._epsilon > self._epsilon_min and not self._test_mode:
+                                self._epsilon *= self._epsilon_decay 
                     
                     # Advance to the next state
                     state = next_state
@@ -307,7 +307,7 @@ class RLAgent:
             print(f"Episode {e} summary: Train loss: {train_loss:.4f}, Val loss: {val_loss:.4f}, Total val trades: {val_results['total_trades']}, Hit rate: {val_results['hit_rate']:.3f}")
             
             # Store logs for this episode
-            logs_by_episode[e] = {
+            logs_by_episode[int(e)] = {
                 "train_loss": train_loss,
                 "val_results": val_results,
                 "epsilon": self._epsilon
@@ -383,7 +383,6 @@ class RLAgent:
 
         hit_rate = wins / max(wins + losses, 1)
         return {
-            "episode": episode_id,
             "sum_reward": float(total_reward),
             "total_trades": int(total_trades),
             "hit_rate": float(hit_rate),

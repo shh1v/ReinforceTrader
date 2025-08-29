@@ -38,7 +38,7 @@ def evaluate_reward_function(ticker: str, start_date: str, end_date: str,
     data.drop(data.index[-1], inplace=True)        
     
     # Plot the closing data for the ticker
-    fig, ax1 = plt.subplots(figsize=(14, 8))
+    fig, ax1 = plt.subplots(figsize=(14, 6))
     
     # Plot the close price of the ticker
     ax1.set_xlabel('Date')
