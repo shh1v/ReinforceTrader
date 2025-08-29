@@ -456,75 +456,76 @@ class RLAgent:
             "hold": 1 if a == 0 else 0,
         }
 
-    def test(self, state_loader: EpisodeStateLoader, episode_ids: list[int], test_config: dict[str, Any]):
+    def test(self, state_loader: EpisodeStateLoader, episode_id: int, test_config: dict[str, Any]):
         # ensure pure evaluation
         prev_test_mode = self._test_mode
         self._test_mode = True
 
         tickers_all = state_loader.get_all_tickers()
 
-        # Keep a single ordered list of keys and parallel lists of series for safe alignment
-        col_keys = [] # [(Episode, Ticker), ...] in deterministic order
-        sig_series_list = [] # [Series, ...]
-        px_series_list  = [] # [Series, ...]
+        # Keep a single ordered list of tickers and parallel lists of series for safe alignment
+        col_keys = []            # ["AAPL", "MSFT", ...] in deterministic order
+        sig_series_list = []     # [Series-of-dicts, ...]
+        px_series_list  = []     # [Series-of-floats, ...]
 
-        for ep in episode_ids:
-            for ticker in tqdm(tickers_all, desc=f'Testing episode {ep}', ncols=100):
-                L = state_loader.get_episode_len('test', ep, ticker)
-                if L < self._window_size + 1:
-                    continue
+        for ticker in tqdm(tickers_all, desc=f'Testing episode {int(episode_id)}', ncols=100):
+            L = state_loader.get_episode_len('test', episode_id, ticker)
+            if L < self._window_size + 1:
+                continue
 
-                # Aligned date index for this (ep, ticker)
-                idx = state_loader.get_test_dates(ep, ticker)
+            # Aligned date index for this (episode, ticker)
+            idx = state_loader.get_test_dates(episode_id, ticker)
 
-                # Prepare iteration
-                t0 = self._window_size - 1
-                state = state_loader.get_state_matrix('test', ep, ticker, t0, self._window_size)
-                prev_pos = 0
+            # Prepare iteration
+            t0 = self._window_size - 1
+            state    = state_loader.get_state_matrix('test', episode_id, ticker, t0, self._window_size)
+            prev_pos = 0
 
-                # allocate containers (length L to match idx)
-                sig_cells = [None] * L
-                close_px  = np.empty(L, dtype=np.float32)
+            # allocate containers (length L to match idx)
+            sig_cells = [None] * L
+            close_px  = np.empty(L, dtype=np.float32)
 
-                # warm-up rows: force hold until we have a full window
-                for t in range(0, t0):
-                    close_px[t] = float(state_loader.get_state_OHLCV('test', ep, ticker, t)[3])
-                    sig_cells[t] = self._action_to_onehot(0)
+            # warm-up rows: force hold until we have a full window
+            for t in range(0, t0):
+                close_px[t] = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
+                sig_cells[t] = self._action_to_onehot(0)
 
-                # main loop
-                for t in range(t0, L - 1):
-                    curr_close = float(state_loader.get_state_OHLCV('test', ep, ticker, t)[3])
-                    next_close = float(state_loader.get_state_OHLCV('test', ep, ticker, t + 1)[3])
-                    close_px[t] = curr_close
+            # main loop
+            for t in range(t0, L - 1):
+                curr_close = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
+                next_close = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t + 1)[3])
+                close_px[t] = curr_close
 
-                    action = self.act(state, prev_pos)
-                    sig_cells[t] = self._action_to_onehot(action)
+                action = self.act(state, prev_pos)
+                sig_cells[t] = self._action_to_onehot(action)
 
-                    _, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_close, next_close)
-                    next_state = state_loader.get_state_matrix('test', ep, ticker, t + 1, self._window_size)
-                    state = next_state
-                    prev_pos = pos_t
+                _, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_close, next_close)
+                next_state = state_loader.get_state_matrix('test', episode_id, ticker, t + 1, self._window_size)
+                state = next_state
+                prev_pos = pos_t
 
-                # final row (t = L-1): record price; no new decision possible → force hold
-                close_px[L - 1] = float(state_loader.get_state_OHLCV('test', ep, ticker, L - 1)[3])
+            # final row (t = L-1): record price; no new decision possible → force hold
+            close_px[L - 1] = float(state_loader.get_state_OHLCV('test', episode_id, ticker, L - 1)[3])
+            if sig_cells[L - 1] is None:
                 sig_cells[L - 1] = self._action_to_onehot(0)
 
-                # Stash in ordered lists
-                key = (ep, ticker)
-                col_keys.append(key)
-                sig_series_list.append(pd.Series(sig_cells, index=idx))
-                px_series_list.append(pd.Series(close_px, index=idx))
+            # Stash in ordered lists
+            col_keys.append(ticker)
+            sig_series_list.append(pd.Series(sig_cells, index=idx))
+            px_series_list.append(pd.Series(close_px, index=idx))
 
-        # Concatenate into DataFrames with MultiIndex columns
+        # Concatenate into DataFrames with single-level "Ticker" columns
         if len(sig_series_list) == 0:
             signals_df = pd.DataFrame()
             prices_df  = pd.DataFrame()
         else:
-            columns = pd.MultiIndex.from_tuples(col_keys, names=["Episode", "Ticker"])
-            signals_df = pd.concat(sig_series_list, axis=1)
-            signals_df.columns = columns
-            prices_df = pd.concat(px_series_list, axis=1)
-            prices_df.columns = columns
+            # Use outer join for safety in case of rare index mismatches
+            signals_df = pd.concat(sig_series_list, axis=1, join='outer')
+            prices_df  = pd.concat(px_series_list,  axis=1, join='outer')
+
+            # Set columns to a simple Index of tickers
+            signals_df.columns = pd.Index(col_keys, name="Ticker")
+            prices_df.columns  = pd.Index(col_keys, name="Ticker")
 
         # restore mode
         self._test_mode = prev_test_mode
