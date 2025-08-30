@@ -38,7 +38,7 @@ def evaluate_reward_function(ticker: str, start_date: str, end_date: str,
     data.drop(data.index[-1], inplace=True)        
     
     # Plot the closing data for the ticker
-    fig, ax1 = plt.subplots(figsize=(14, 8))
+    fig, ax1 = plt.subplots(figsize=(14, 6))
     
     # Plot the close price of the ticker
     ax1.set_xlabel('Date')
@@ -46,7 +46,7 @@ def evaluate_reward_function(ticker: str, start_date: str, end_date: str,
     ax1.plot(data.index, data, linewidth=1.5, color='black', alpha=0.7, label=f'{ticker} Close')
     for x in data.index:
         ax1.axvline(x=x, color='gray', alpha=0.2)
-    
+    ax1.set_xticks(data.index)
     ax1.set_xticklabels(data.index, rotation=45)
     ax1.set_title(f'Reward Function Evaluation for {ticker}')
     
