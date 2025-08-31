@@ -10,11 +10,12 @@ from ta.momentum import RSIIndicator
 
 
 class RawDataLoader:
-    def __init__(self, start_date: str, end_date: str, tickers=[], index: str=''):
+    def __init__(self, start_date: str, end_date: str, tickers=[], index: str='', verbose=True):
         # Store the start and end dates of data to be downloaded/load from cache
         self._start_date = start_date
         self._end_date = end_date
         self._index = index
+        self._verbose = verbose
 
         # Make sure there is no conflict between tickers and index
         if tickers and index:
@@ -67,15 +68,16 @@ class RawDataLoader:
         # Drop all tickers that have NaN values
         data = data.drop(columns=tickers_to_drop, level=0)
         columns_left = data.columns.get_level_values('Ticker').nunique()
-        print(f'Dropped {len(tickers_to_drop)} tickers. {columns_left} tickers left.')
-        print(f"Tickers dropped: {', '.join(tickers_to_drop)}")
+        if self._verbose:
+            print(f'Dropped {len(tickers_to_drop)} tickers. {columns_left} tickers left.')
+            print(f"Tickers dropped: {', '.join(tickers_to_drop)}")
 
         return data
 
 
     def _download_hist_prices(self, tickers: list, save: bool, save_path=None) -> pd.DataFrame:
         # Download data from yfinance
-        data = yf.download(tickers=tickers, start=self._start_date, end=self._end_date, auto_adjust=True)
+        data = yf.download(tickers=tickers, start=self._start_date, end=self._end_date, auto_adjust=True, progress=self._verbose, threads=True)
 
         # Reorder multi-column index to ['Ticker', 'Price']
         data = data.reorder_levels(['Ticker', 'Price'], axis=1)
@@ -86,7 +88,8 @@ class RawDataLoader:
         # Save the data locally to reduce API calls
         if save:
             data.to_csv(save_path)
-            print(f"Data saved to {save_path}")
+            if self._verbose:
+                print(f"Data saved to {save_path}")
 
         return data
 
@@ -99,10 +102,12 @@ class RawDataLoader:
 
         # If cached file exists, load and return
         if load_from_cache and file_path.exists():
-            print(f"Loading cached data from {file_path}")
+            if self._verbose:
+                print(f"Loading cached data from {file_path}")
             return pd.read_csv(file_path, header=[0, 1], index_col=0, parse_dates=True)
-            
-        print(f'Downloading from yfinance as cached data does not exist in {cache_path}')
+        
+        if self._verbose:
+            print(f'Downloading from yfinance as cached data does not exist in {cache_path}')
         return self._download_hist_prices(tickers, save=load_from_cache, save_path=file_path)
 
     def get_hist_prices(self, tickers: list=[]):
