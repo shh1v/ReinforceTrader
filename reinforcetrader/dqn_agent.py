@@ -55,15 +55,15 @@ class RLAgent:
         self._num_motif_feat = agent_config['num_motif_features']
         self._num_context_feat = agent_config['num_context_features']
         
-        # Hold: 0, Buy: 1, Sell: 2
-        self._action_size = 3
+        # A = {0: buy, 1: hold-out, 2: sell, 3: hold-in}
+        # A_out_trade = {0: buy, 1: hold-out}
+        # A_in_trade  = {2: sell, 3: hold-in}
+        
+        self._action_size = 4
 
         # Define memory to store (state, action, reward, new_state) pairs for exp. replay
         buffer_length = agent_config.get('memory_buffer_len', 10000)
         self._memory = deque(maxlen=buffer_length)
-
-        # Define inventory to hold trades
-        self._inventory = []
 
         self._test_mode = test_mode
         self._model_name = model_name
@@ -134,7 +134,11 @@ class RLAgent:
         return {'motif_input': motif_input, 'context_input': context_input}
     
     def get_q_values(self, state_matrix: np.ndarray, prev_pos: int) -> np.ndarray:
-        # Predict q values through DQN
+        # Note: prev_pos is 0 if out of trade or 1 is in trade.
+        if prev_pos not in {0, 1}:
+            raise ValueError(f'Invalid trade position: {prev_pos}')
+        
+        # Predict q values through DQN        
         model_input = self._get_states(state_matrix, prev_pos)
         q_values = self._model.predict(x=model_input, verbose=0)
 
@@ -149,16 +153,29 @@ class RLAgent:
 
     def act(self, state_matrix: np.ndarray, prev_pos: int) -> int:
         if prev_pos not in {0, 1}:
-            raise ValueError(f'Invalid previous position: {prev_pos}')
+            raise ValueError(f'Invalid trade position: {prev_pos}')
         
         # Defines an epsilon-greedy behaviour policy
         # Pick random action epsilon times
         if not self._test_mode and np.random.random() < self._epsilon:
-            return np.random.randint(self._action_size)
+            if prev_pos == 0:
+                # A_{Out of trade}: {0: buy, 1: hold-out}
+                return np.random.randint(0, 2)
+            else:
+                # A_{In trade}: {2: sell, 3: hold-in}
+                return np.random.randint(2, 4)
 
-        # Pick action from DQN 1-epsilon times
+        # Pick action from DQN 1 - epsilon% times
+        # mask is used to restrict action space
+        if prev_pos == 0:
+            mask = np.array([0, 0, -float('inf'), -float('inf')])
+        else:
+            mask = np.array([-float('inf'), -float('inf'), 0, 0])
+            
         q_values = self.get_q_values(state_matrix, prev_pos)
-        return int(np.argmax(q_values))
+        restricted_q_values = mask + q_values
+        
+        return int(np.argmax(restricted_q_values))
 
     def exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
@@ -168,6 +185,7 @@ class RLAgent:
         idx = np.random.choice(len(self._memory), size=batch_size, replace=False)
         batch = [self._memory[i] for i in idx]
 
+        # Prepare the batch arrays for efficient processing by GPU
         B, W, M, C = batch_size, self._window_size, self._num_motif_feat, self._num_context_feat
         motif_batch = np.empty((B, W, M), dtype=np.float32)
         context_batch = np.empty((B, W*C + 1), dtype=np.float32)
@@ -185,14 +203,15 @@ class RLAgent:
             context_batch[i] = np.concatenate([ctx, np.array([prev_pos], dtype=np.float32)], axis=0)
 
             # If no next_state, set done flag to True
+            # Note: done is True or next_state is None only for each ticker's episode end
             if next_state is None:
                 next_motif_batch[i] = motif
                 next_context_batch[i] = context_batch[i]
                 dones[i] = 1.0
             else:
                 next_motif = next_state[:, :M].astype(np.float32)
-                next_ctx   = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
-                next_motif_batch[i]   = next_motif
+                next_ctx = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
+                next_motif_batch[i] = next_motif
                 next_context_batch[i] = np.concatenate([next_ctx, np.array([next_prev_pos], dtype=np.float32)], axis=0)
                 dones[i] = 1.0 if done else 0.0
 
@@ -449,11 +468,12 @@ class RLAgent:
             plt.close()
 
     def _action_to_onehot(self, a: int) -> dict:
-        # 0: hold, 1: buy, 2: sell
+        # 0: buy, 1: hold-in, 2: sell, 3: hold-out
         return {
-            "buy":  1 if a == 1 else 0,
+            "buy":  1 if a == 0 else 0,
+            "hold-out":  1 if a == 1 else 0,
             "sell": 1 if a == 2 else 0,
-            "hold": 1 if a == 0 else 0,
+            "hold-in": 1 if a == 3 else 0,
         }
 
     def test(self, state_loader: EpisodeStateLoader, episode_id: int, test_config: dict[str, Any]):
@@ -485,29 +505,44 @@ class RLAgent:
             sig_cells = [None] * L
             close_px  = np.empty(L, dtype=np.float32)
 
-            # warm-up rows: force hold until we have a full window
+            # warm-up rows: force hold-out until we have a full window
             for t in range(0, t0):
                 close_px[t] = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
-                sig_cells[t] = self._action_to_onehot(0)
+                sig_cells[t] = self._action_to_onehot(1)
 
             # main loop
             for t in range(t0, L - 1):
                 curr_close = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
-                next_close = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t + 1)[3])
                 close_px[t] = curr_close
 
                 action = self.act(state, prev_pos)
                 sig_cells[t] = self._action_to_onehot(action)
 
-                _, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_close, next_close)
+                # Compute weather 
+                if prev_pos == 0 and action == 0:
+                    # buy signal was given when out of trade
+                    pos_t = 1
+                elif prev_pos == 1 and action == 2:
+                    # sell signal was given when in trade
+                    pos_t = 0
+                else:
+                    # keep the previous position
+                    pos_t = prev_pos
+                
+                # Advance to the next state and update prev_pos
                 next_state = state_loader.get_state_matrix('test', episode_id, ticker, t + 1, self._window_size)
                 state = next_state
                 prev_pos = pos_t
 
-            # final row (t = L-1): record price; no new decision possible → force hold
+            # final row (t = L-1): record price; no new decision possible so force hold-out or sell
             close_px[L - 1] = float(state_loader.get_state_OHLCV('test', episode_id, ticker, L - 1)[3])
             if sig_cells[L - 1] is None:
-                sig_cells[L - 1] = self._action_to_onehot(0)
+                if prev_pos == 0:
+                    # out of trade -> hold-out
+                    sig_cells[L - 1] = self._action_to_onehot(1)
+                else:
+                    # in trade -> sell
+                    sig_cells[L - 1] = self._action_to_onehot(2)
 
             # Stash in ordered lists
             col_keys.append(ticker)
