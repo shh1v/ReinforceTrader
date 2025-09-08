@@ -22,18 +22,24 @@ class RawDataLoader:
             raise ValueError('Tickers and index cannot be provided simultaneously.')
         elif not tickers and not index:
             raise ValueError('Either tickers or index must be provided.')
-        
-        # If tickers are provided, do not load them from cache
-        load_from_cache = False
                 
+        # Only load from cache if tickers are fetched from index
+        load_from_cache = False
+        
         # Fetch all the tickers in index if specific tickers are not provided
         if not tickers:
             # Prefer loading from cache to avoid API calls
             load_from_cache = True
             tickers = self._fetch_tickers(index=self._index)
+            benchmark_ticker = '^DJI' if index == 'DJI' else '^SPX'
+            
 
         # Load all the ticker price and volume data
-        self._hist_data = self._load_hist_prices(tickers, load_from_cache=load_from_cache)
+        self._ticker_data = self._load_hist_prices(tickers, load_from_cache=load_from_cache)
+        if benchmark_ticker:
+            self._benchmark_data = self._download_hist_prices([benchmark_ticker], save=False)
+        else:
+            self._benchmark_data = None
             
     def _fetch_tickers(self, index: str='DJI') -> list:
         if index == 'DJI':
@@ -71,6 +77,10 @@ class RawDataLoader:
         if self._verbose:
             print(f'Dropped {len(tickers_to_drop)} tickers. {columns_left} tickers left.')
             print(f"Tickers dropped: {', '.join(tickers_to_drop)}")
+        
+        # Drop the multi-column index if only one ticker is present
+        if columns_left == 1:
+            data.columns = data.columns.droplevel('Ticker')
 
         return data
 
@@ -113,9 +123,9 @@ class RawDataLoader:
     def get_hist_prices(self, tickers: list=[]):
         # Only return selected columns
         if tickers:
-            return self._hist_data[tickers]
+            return self._ticker_data[tickers], self._benchmark_data
         
-        return self._hist_data
+        return self._ticker_data, self._benchmark_data
 
 class FeatureBuilder:
     def __init__(self, hist_prices, index='DJI'):
