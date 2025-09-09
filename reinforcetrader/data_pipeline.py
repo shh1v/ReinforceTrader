@@ -128,10 +128,17 @@ class RawDataLoader:
         return self._ticker_data, self._benchmark_data
 
 class FeatureBuilder:
-    def __init__(self, hist_prices, index='DJI'):
-        self._hist_prices = hist_prices.sort_index()
-        self._features_data = None
+    def __init__(self, ticker_data, benchmark_data: pd.DataFrame, return_horizons: list[int], index: str='DJI') -> None:
+        if ticker_data.empty or benchmark_data.empty:
+            raise ValueError('Ticker data and benchmark data cannot be empty.')
+        
+        self._ticker_data = ticker_data.sort_index()
+        self._benchmark_data = benchmark_data.sort_index()
+        
+        self._return_horizons = return_horizons
         self._index = index
+        
+        self._features_data = None
 
     def _save_features_data(self, save_dir='data/processed') -> bool:
         if self._features_data is None or self._features_data.empty:
@@ -170,27 +177,33 @@ class FeatureBuilder:
     
     def build_features(self, save=True):
         # Get tickers symbols
-        tickers = self._hist_prices.columns.get_level_values('Ticker').unique()
+        tickers = self._ticker_data.columns.get_level_values('Ticker').unique()
 
         # Predefine feature names
         # Include OHLCV for reward fn, portfolio managment, and more
         OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
+        # Include excess returns over specifiied horizons
+        ex_ret_f = [f'ExRet{h}' for h in self._return_horizons]
         # Include motif feature to identify candlestick patterns
         motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL', 'Gap', 'GapFill']
         # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
         technical_f = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
-        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + motif_f + technical_f],
+        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + ex_ret_f + motif_f + technical_f],
                                                      names=['Ticker', 'Feature'])
-        self._features_data = pd.DataFrame(index=self._hist_prices.index, columns=feature_columns, dtype=float)
+        self._features_data = pd.DataFrame(index=self._ticker_data.index, columns=feature_columns, dtype=float)
 
+        # Compute benchmark returns for excess return calculation
+        bc = self._benchmark_data['Close']
+        benchmark_returns = {h: np.log(bc.shift(-h) / bc) for h in self._return_horizons}
+        
         for ticker in tqdm(tickers, ncols=100, desc='Building ticker features'):
-            o = self._hist_prices[ticker]['Open']
-            h = self._hist_prices[ticker]['High']
-            l = self._hist_prices[ticker]['Low']
-            c = self._hist_prices[ticker]['Close']
-            v = self._hist_prices[ticker]['Volume']
+            o = self._ticker_data[ticker]['Open']
+            h = self._ticker_data[ticker]['High']
+            l = self._ticker_data[ticker]['Low']
+            c = self._ticker_data[ticker]['Close']
+            v = self._ticker_data[ticker]['Volume']
 
             # Keep OHLCV as is (may not be part of state representation)
             self._features_data.loc[:, (ticker, 'Open')] = o
@@ -201,6 +214,15 @@ class FeatureBuilder:
             
             # Use eps to avoid division by zero
             eps = np.finfo(float).eps
+            
+            # Compute excess returns over specified horizons
+            for hzn in self._return_horizons:
+                # Compute the log returns for the ticker
+                ticker_returns = np.log(c.shift(-hzn) / c)
+                
+                # Compute excess return and normalize
+                ex_ret = ticker_returns - benchmark_returns[hzn]
+                self._features_data.loc[:, (ticker, f'ExRet{hzn}')] = ex_ret
             
             # Compute the candle body features
             # Body relative to total range, clip for stability
