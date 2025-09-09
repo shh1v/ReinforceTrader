@@ -159,9 +159,14 @@ class FeatureBuilder:
 
     
     def _norm(self, feature_data: pd.Series, window=126) -> pd.Series:
-        mean = feature_data.rolling(window=window).mean()
-        std = feature_data.rolling(window=window).std()
-        return (feature_data - mean) / (std + 1e-12)
+        # Compute rolling mean and std
+        mean = feature_data.rolling(window=window, min_periods=window).mean()
+        std = feature_data.rolling(window=window, min_periods=window).std()
+        
+        # Avoid division by zero by replacing with machine epsilon if zero
+        std = std.mask(std < np.finfo(float).eps, np.finfo(float).eps)
+        
+        return (feature_data - mean) / std
     
     def build_features(self, save=True):
         # Get tickers symbols
@@ -171,7 +176,7 @@ class FeatureBuilder:
         # Include OHLCV for reward fn, portfolio managment, and more
         OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
         # Include motif feature to identify candlestick patterns
-        motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL']
+        motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL', 'Gap', 'GapFill']
         # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
         technical_f = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
 
@@ -181,69 +186,93 @@ class FeatureBuilder:
         self._features_data = pd.DataFrame(index=self._hist_prices.index, columns=feature_columns, dtype=float)
 
         for ticker in tqdm(tickers, ncols=100, desc='Building ticker features'):
-            open = self._hist_prices[ticker]['Open']
-            high = self._hist_prices[ticker]['High']
-            low = self._hist_prices[ticker]['Low']
-            close = self._hist_prices[ticker]['Close']
-            volume = self._hist_prices[ticker]['Volume']
+            o = self._hist_prices[ticker]['Open']
+            h = self._hist_prices[ticker]['High']
+            l = self._hist_prices[ticker]['Low']
+            c = self._hist_prices[ticker]['Close']
+            v = self._hist_prices[ticker]['Volume']
 
             # Keep OHLCV as is (may not be part of state representation)
-            self._features_data.loc[:, (ticker, 'Open')] = open
-            self._features_data.loc[:, (ticker, 'High')] = high
-            self._features_data.loc[:, (ticker, 'Low')] = low
-            self._features_data.loc[:, (ticker, 'Close')] = close
-            self._features_data.loc[:, (ticker, 'Volume')] = volume
+            self._features_data.loc[:, (ticker, 'Open')] = o
+            self._features_data.loc[:, (ticker, 'High')] = h
+            self._features_data.loc[:, (ticker, 'Low')] = l
+            self._features_data.loc[:, (ticker, 'Close')] = c
+            self._features_data.loc[:, (ticker, 'Volume')] = v
             
             # Use eps to avoid division by zero
-            eps = 1e-12
+            eps = np.finfo(float).eps
             
             # Compute the candle body features
             # Body relative to total range, clip for stability
-            candle_range = (high - low).replace(0, eps)
+            candle_height = (h - l)
+            candle_height = candle_height.mask(candle_height < eps, eps)
+            
             self._features_data.loc[:, (ticker, 'Body/HL')] = (
-                (close - open) / candle_range
+                (c - o) / candle_height
             ).clip(-1.0, 1.0)
 
             # Upper shadow relative to range
             self._features_data.loc[:, (ticker, 'UShadow/HL')] = (
-                    (high - np.maximum(open, close)) / candle_range
+                    (h - np.maximum(o, c)) / candle_height
             ).clip(0.0, 1.0)
 
+            # Gap and Gap fill relative to the previous close
+            pc = c.shift(1)
+            gap_raw = o - pc
+            gap = np.log(o / pc)
+            
+            # Identify positions for gap up and gap down
+            gap_up = gap_raw > 0
+            gap_down = gap_raw < 0
+
+            # Compute the gap fill %
+            gap_fill = pd.Series(0.0, index=gap.index)
+            gap_fill[gap_up] = (o - l).where(gap_up) / (gap_raw).where(gap_up)
+            gap_fill[gap_down] = (h - o).where(gap_down) / (-gap_raw).where(gap_down)
+            
+            # Assign computed gap metrics in features data
+            self._features_data.loc[:, (ticker, 'Gap')] = self._norm(gap)
+            self._features_data.loc[:, (ticker, 'GapFill')] = gap_fill.clip(0.0, 1.0)
+            
             # Lower shadow relative to range
             self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
-                (np.minimum(open, close) - low) / candle_range
+                (np.minimum(o, c) - l) / candle_height
             ).clip(0.0, 1.0)
 
             # Compute rolling Exponential Moving Averages: 5, 13, 26
-            ema5 = EMAIndicator(close=close, window=5).ema_indicator()
-            ema13 = EMAIndicator(close=close, window=13).ema_indicator()
-            ema26 = EMAIndicator(close=close, window=26).ema_indicator()
+            ema5 = EMAIndicator(close=c, window=5).ema_indicator()
+            ema13 = EMAIndicator(close=c, window=13).ema_indicator()
+            ema26 = EMAIndicator(close=c, window=26).ema_indicator()
 
             # Compute the EMA ratios
-            self._features_data.loc[:, (ticker, 'C/EMA5')] = self._norm((close / ema5) - 1)
+            self._features_data.loc[:, (ticker, 'C/EMA5')] = self._norm((c / ema5) - 1)
             self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = self._norm((ema5 / ema13) - 1)
             self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = self._norm((ema13 / ema26) - 1)
 
             # Compute Bollinger Bands (%B and Bandwidth)
-            bb = BollingerBands(close, window=20, window_dev=2)
+            bb = BollingerBands(c, window=20, window_dev=2)
             bb_sma20 = bb.bollinger_mavg()
             bb_upper = bb.bollinger_hband()
             bb_lower = bb.bollinger_lband()
             bb_width = bb_upper - bb_lower
-            self._features_data.loc[:, (ticker, 'B%B')] = (close - bb_lower) / (bb_width + eps)
-            self._features_data.loc[:, (ticker, 'BBW')] = self._norm(bb_width / (bb_sma20 + eps))
+            # Avoid division by zero
+            bb_width = bb_width.mask(bb_width.abs() < eps, eps)
+            bb_sma20 = bb_sma20.mask(bb_sma20.abs() < eps, eps)
+            self._features_data.loc[:, (ticker, 'B%B')] = (c - bb_lower) / bb_width
+            self._features_data.loc[:, (ticker, 'BBW')] = self._norm(bb_width / bb_sma20)
 
             # Compute Relative Strength Index (RSI) scaled bw [-1, 1]
-            rsi = RSIIndicator(close, window=14).rsi()
+            rsi = RSIIndicator(c, window=14).rsi()
             self._features_data.loc[:, (ticker, 'RSI')] = (rsi - 50) / 50
 
             # Compute Average Directional Index scaled bw [0, 1]
-            adx = ADXIndicator(high=high, low=low, close=close, window=14).adx()
+            adx = ADXIndicator(high=h, low=l, close=c, window=14).adx()
             self._features_data.loc[:, (ticker, 'ADX')] = adx / 100.0
 
             # Compute ratio of current volume over 20 volume moving average
-            vol20 = volume.rolling(20, min_periods=20).mean()
-            self._features_data.loc[:, (ticker, 'V/Vol20')] = self._norm(volume / (vol20 + eps))
+            vol20 = v.rolling(20, min_periods=20).mean()
+            vol20 = vol20.mask(vol20 < eps, eps)
+            self._features_data.loc[:, (ticker, 'V/Vol20')] = self._norm(v / vol20)
         
         # Drop all rows with NaN values
         self._features_data = self._features_data.dropna()
