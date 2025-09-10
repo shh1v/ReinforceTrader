@@ -49,7 +49,10 @@ class DualBranchDQN(keras.Model):
         return self._model
 
 class RLAgent:
-    def __init__(self, agent_config, test_mode: int=False, model_name: str='') -> None:
+    def __init__(self, agent_config, reward_params: dict[str, object], test_mode: int=False, model_name: str='') -> None:
+        # Store the reward parameters which are used to compute the reward
+        self._reward_params = reward_params
+        
         # Store state and action representation configurations
         self._window_size = agent_config['state_matrix_window']
         self._num_motif_feat = agent_config['num_motif_features']
@@ -82,6 +85,7 @@ class RLAgent:
         # Init target network update and frequency
         self._init_target_network()
     
+
     def get_model(self) -> keras.Model:
         return self._model
 
@@ -237,22 +241,70 @@ class RLAgent:
 
         return float(loss)
 
-
     @staticmethod
-    def calculate_reward(prev_pos: int, action: int, curr_price: float, next_price: float) -> tuple[float, int]:
-        # Note: A buy signal when prev_pos is 1 is equivlent to hold
-        # A sell signal when prev_pos is 0 is equivlent to hold
-        # Update position from action
-        if action == 0:
-            pos_t = prev_pos
-        elif action == 1:
-            pos_t = 1
-        elif action == 2:
-            pos_t = 0
+    def _softmax_weighted_sum(ex_ret, S, tau, positive=True) -> np.float32:
+        if tau <= 0:
+            raise ValueError("tau must be > 0")
+        
+        X = np.array([ex_ret[f'ExRet{s}'] for s in S], dtype=np.float32)
+        sign = 1.0 if positive else -1.0
+        logits = (sign * X) / float(tau)
+        m = max(logits)
+        exp_shifted = np.exp(logits - m)
+        W = exp_shifted / exp_shifted.sum()
+        
+        return (W * X).sum()
 
-        log_ret = np.log(next_price / max(curr_price, 1e-12))
-        trade_cost = 0.0005 if pos_t != prev_pos else 0.0
-        reward = pos_t * log_ret - trade_cost
+
+    def calculate_reward(self, prev_pos, action, ex_ret: dict[str, np.float32]) -> tuple[float, int]:
+        # Note 1: prev_pos is 0 if out of trade or 1 is in trade.
+        # Note 2: If prev_pos is 0, valid actions are {0: buy, 1: hold-out}.
+        # If prev_pos is 1, valid actions are {2: sell, 3: hold-in}.
+
+        if prev_pos == 0 and action not in {0, 1}:
+            raise ValueError(f'Invalid action {action} when out of trade')
+        if prev_pos == 1 and action not in {2, 3}:
+            raise ValueError(f'Invalid action {action} when in trade')
+        
+        # Extract reward function params
+        Hb, Hs = self._reward_params['Hb'], self._reward_params['Hs']
+        tb, ts = self._reward_params['tb'], self._reward_params['ts']
+        cost = self._reward_params['cost']
+        gamma = self._reward_params['gamma']
+        alpha, beta = self._reward_params['alpha'], self._reward_params['beta']
+        lam = self._reward_params['lambda']
+        upsilon, mu = self._reward_params['upsilon'], self._reward_params['mu']
+        
+        # Compute the reward based on action and expected returns
+        if prev_pos == 0:
+            # A_{Out of trade}: {0: buy, 1: hold-out}
+            if action == 0:
+                # buy signal was given when out of trade
+                g = gamma * RLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
+                reward = g - cost # type: ignore
+                pos_t = 1
+            else:
+                # hold-out signal was given when out of trade
+                avoid_loss = -RLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False)
+                miss_gain = RLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True)
+                reward = alpha * max(0.0, avoid_loss) - beta * max(0.0, miss_gain) # type: ignore
+                pos_t = 0
+        elif prev_pos == 1:
+            # A_{In trade}: {2: sell, 3: hold-in}
+            if action == 2:
+                # sell signal was given when in trade
+                g = -lam * RLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False) # type: ignore
+                reward = max(0.0, g) - cost # type: ignore
+                pos_t = 0
+            else:
+                # hold-in signal was given when in trade
+                g_pos = upsilon * RLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
+                g_neg = mu * RLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=dts, positive=False) # type: ignore
+                reward = max(0.0, g_pos + g_neg)
+                pos_t = 1
+        else:
+            raise ValueError(f'Invalid trade position: {prev_pos}')
+        
         return reward, pos_t
     
     def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any]) -> dict[str, Any]:
