@@ -139,6 +139,7 @@ class FeatureBuilder:
         self._index = index
         
         self._features_data = None
+        self._feature_indices = None
 
     def _save_features_data(self, save_dir='data/processed') -> bool:
         if self._features_data is None or self._features_data.empty:
@@ -193,7 +194,7 @@ class FeatureBuilder:
         feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + ex_ret_f + motif_f + technical_f],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._ticker_data.index, columns=feature_columns, dtype=float)
-
+        
         # Compute benchmark returns for excess return calculation
         bc = self._benchmark_data['Close']
         benchmark_returns = {h: np.log(bc.shift(-h) / bc) for h in self._return_horizons}
@@ -302,9 +303,26 @@ class FeatureBuilder:
         # Save the features data to use for later
         if save:
             self._save_features_data()
+        
+        # build once at the end of build_features
+        feat_level = self._features_data.columns.get_level_values('Feature').unique()
+
+        feature_indices = {
+            'OHLCV': np.flatnonzero(feat_level.isin(OHLCV_f)),
+            'Rewards': np.flatnonzero(feat_level.isin(ex_ret_f)),
+            'State': np.flatnonzero(feat_level.isin(motif_f + technical_f))
+        }
+        
+        self._feature_indices = feature_indices
 
     def get_features(self) -> pd.DataFrame:
         if self._features_data is None:
             return pd.DataFrame()
         
         return self._features_data
+    
+    def get_feature_indices(self) -> dict:
+        if self._feature_indices is None:
+            return {}
+        
+        return self._feature_indices

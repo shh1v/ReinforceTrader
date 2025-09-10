@@ -5,14 +5,16 @@ import json
 from pathlib import Path
 
 class EpisodeStateLoader:
-    def __init__(self, features_data: pd.DataFrame, episode_config_path: str):
+    def __init__(self, features_data: pd.DataFrame, feature_indices: dict[str, np.ndarray], episode_config_path: str):
         self._features_data = features_data
+        self._feature_indices = feature_indices
         self._episode_config = self._load_config(episode_config_path)
 
         # Store all tickers symbols for getters function
         self._ticker_symbols = self._features_data.columns.get_level_values('Ticker').unique()
 
-        # Store the OHCLV + states in dicts keyed by (episode_id, ticker) -> np.ndarray [len(ep), F]
+        # Store the features in their respoective dicts
+        # keyed by (episode_id, ticker) -> np.ndarray [len(ep), F]
         self._train_features: dict[tuple[int, str], np.ndarray] = {}
         self._val_features: dict[tuple[int, str], np.ndarray] = {}
         self._test_features: dict[tuple[int, str], np.ndarray] = {}
@@ -99,18 +101,11 @@ class EpisodeStateLoader:
         store = self._get_set_features(episode_type)
         episode_ticker_features = store[(episode_id, ticker)]
 
-        # Check if end index is appropriate and state features exist
-        T, F = episode_ticker_features.shape
-        if end_index < 0 or end_index >= T:
-            raise IndexError(f"end_index {end_index} out of range [0, {T-1}]")
-        if F <= 5:
-            raise ValueError("Expected at least >6 features (first 5 are OHLCV).")
-
         # Compute start index of the block
         start_index = end_index - window_size + 1
 
         # Slice features (skip first 5 columns)
-        feats = episode_ticker_features[:, 5:]  # shape [T, F_eff]
+        feats = episode_ticker_features[:, self._feature_indices['State']]
 
         if start_index >= 0:
             state_matrix = feats[start_index:end_index + 1, :]
@@ -127,13 +122,16 @@ class EpisodeStateLoader:
         store = self._get_set_features(episode_type)
         episode_ticker_features = store[(episode_id, ticker)]
 
-        # Check if index is in episode bounds
-        T = episode_ticker_features.shape[0]
-        if index < 0 or index >= T:
-            raise IndexError(f"Index {index} out of range [0, {T-1}]")
+        # Slice the OHLCV features specific columns
+        return episode_ticker_features[index, self._feature_indices['OHLCV']]
+    
+    def get_reward_computes(self, episode_type: str, episode_id: int, ticker: str, index: int):
+        # Get the respective feature data for the episode type
+        store = self._get_set_features(episode_type)
+        episode_ticker_features = store[(episode_id, ticker)]
 
-        # Slice features (skip first 5 columns)
-        return episode_ticker_features[index, :5]
+        # Slice the features relevant to reward computation
+        return episode_ticker_features[index, self._feature_indices['Rewards']]
     
     def get_test_dates(self, episode_id: int, ticker: str) -> pd.DatetimeIndex:
         # find the test episode config
