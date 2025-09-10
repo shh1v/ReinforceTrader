@@ -117,7 +117,7 @@ class EpisodeStateLoader:
 
         return state_matrix
     
-    def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int):
+    def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int) -> np.ndarray:
         # Get the respective feature data for the episode type
         store = self._get_set_features(episode_type)
         episode_ticker_features = store[(episode_id, ticker)]
@@ -125,13 +125,19 @@ class EpisodeStateLoader:
         # Slice the OHLCV features specific columns
         return episode_ticker_features[index, self._feature_indices['OHLCV']]
     
-    def get_reward_computes(self, episode_type: str, episode_id: int, ticker: str, index: int):
+    def get_reward_computes(self, episode_type: str, episode_id: int, ticker: str, index: int) -> dict[str, float]:
+        # Get the reward parameters indices and parameter names
+        reward_comp_indices = self._feature_indices['Rewards']
+        reward_comp_names = self._features_data.columns.get_level_values('Feature')[reward_comp_indices]
+        
         # Get the respective feature data for the episode type
         store = self._get_set_features(episode_type)
         episode_ticker_features = store[(episode_id, ticker)]
 
         # Slice the features relevant to reward computation
-        return episode_ticker_features[index, self._feature_indices['Rewards']]
+        reward_comp_values = episode_ticker_features[index, reward_comp_indices]
+        
+        return {rn: rv for rn, rv in zip(reward_comp_names, reward_comp_values)}
     
     def get_test_dates(self, episode_id: int, ticker: str) -> pd.DatetimeIndex:
         # find the test episode config
