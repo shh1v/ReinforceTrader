@@ -299,7 +299,7 @@ class RLAgent:
             else:
                 # hold-in signal was given when in trade
                 g_pos = upsilon * RLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
-                g_neg = mu * RLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=dts, positive=False) # type: ignore
+                g_neg = mu * RLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False) # type: ignore
                 reward = max(0.0, g_pos + g_neg)
                 pos_t = 1
         else:
@@ -342,10 +342,8 @@ class RLAgent:
                     # Find action based on behaviour policy
                     action = self.act(state, prev_pos)
 
-                    curr_price = float(state_loader.get_state_OHLCV('train', e, ticker, t)[3])
-                    next_price = float(state_loader.get_state_OHLCV('train', e, ticker, t + 1)[3])
-
-                    reward, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_price, next_price)
+                    ex_ret_t = state_loader.get_reward_computes('train', e, ticker, t)
+                    reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
 
                     next_state = state_loader.get_state_matrix('train', e, ticker, t + 1, self._window_size)
                     done = (t == L - 2)
@@ -428,9 +426,11 @@ class RLAgent:
                 action = self.act(state, prev_pos)
                 curr_price = float(state_loader.get_state_OHLCV('validate', episode_id, ticker, t)[3])
                 next_price = float(state_loader.get_state_OHLCV('validate', episode_id, ticker, t + 1)[3])
-
-                r_t, pos_t = RLAgent.calculate_reward(prev_pos, action, curr_price, next_price)
-                total_reward += r_t
+                
+                ex_ret_t = state_loader.get_reward_computes('validate', episode_id, ticker, t)
+                reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
+                
+                total_reward += reward
 
                 # simple trade bookkeeping
                 if prev_pos == 0 and pos_t == 1:
