@@ -75,6 +75,11 @@ class RLAgent:
         self._gamma = agent_config.get('gamma', 0.95)  # discount factor
         self._epsilon = agent_config.get('epsilon_start', 1.0)
         self._epsilon_min = agent_config.get('epsilon_min', 0.01)
+        self._epsilon_boost_factor = agent_config.get('epsilon_boost_factor', 0.0)
+        
+        if not 0.0 <= self._epsilon_boost_factor <= 1.0:
+            raise ValueError("epsilon boost factor must be in [0.0, 1.0]")
+        
         n_updates = agent_config.get('decay_updates', 25000) # No. of updates to minimum epsilon
         self._epsilon_decay = (self._epsilon_min / self._epsilon) ** (1.0 / n_updates)
 
@@ -325,6 +330,9 @@ class RLAgent:
             # Track env steps
             env_steps = 0
             
+            # store the current value of epsilon for boosting
+            epsilon_start = self._epsilon
+            
             # Iterate tickers, training sequentially
             for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
                 L = state_loader.get_episode_len('train', e, ticker)
@@ -375,11 +383,17 @@ class RLAgent:
             val_loss = -val_results['sum_reward']
             print(f"Episode {e} summary: Train loss: {train_loss:.4f}, Val loss: {val_loss:.4f}, Total val trades: {val_results['total_trades']}, Hit rate: {val_results['hit_rate']:.3f}")
             
+            # Boost the epsilon a bit for next episode (as every episode has diff regimes)
+            epsilon_end = self._epsilon
+            self._epsilon = epsilon_start + self._epsilon_boost_factor * (epsilon_start - epsilon_end)
+            
             # Store logs for this episode
             logs_by_episode[int(e)] = {
                 "train_loss": train_loss,
                 "val_results": val_results,
-                "epsilon": self._epsilon
+                "epsilon_start": epsilon_start,
+                "epsilon_current": self._epsilon,
+                "epsilon_end": epsilon_end
             }
             
         # Plot all the training and validation losses
@@ -388,8 +402,11 @@ class RLAgent:
         self._plot_losses(train_losses, val_losses, fname=os.path.join(train_config['plots_dir'], 'train_losses.png'))
         
         # Also plot the epsilon decay
-        epsilons = [logs_by_episode[ep]["epsilon"] for ep in episode_ids] 
-        self._plot_epsilon_decay(epsilons, fname=os.path.join(train_config['plots_dir'], 'epsilon_decay.png'))
+        eps_start = [logs_by_episode[ep]["epsilon_start"] for ep in episode_ids] 
+        eps_curr = [logs_by_episode[ep]["epsilon_current"] for ep in episode_ids] 
+        eps_end = [logs_by_episode[ep]["epsilon_end"] for ep in episode_ids] 
+        eps_fname = os.path.join(train_config['plots_dir'], 'epsilon_decay.png')
+        self._plot_epsilon_decay(eps_start, eps_curr, eps_end, fname=eps_fname)
         
         # Save model checkpoint with the current date and time
         date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -459,15 +476,17 @@ class RLAgent:
             "hit_rate": float(hit_rate),
         }
 
-    def _plot_epsilon_decay(self, epsilons: list[float], fname: str | None = None, show: bool = True):
-        x = np.arange(1, len(epsilons) + 1)
+    def _plot_epsilon_decay(self, eps_start, eps_curr, eps_end: list[float], fname: str | None = None, show: bool = True):
+        x = np.arange(1, len(eps_curr) + 1)
 
         plt.figure(figsize=(8, 4))
-        plt.plot(x, epsilons, marker='o', linewidth=2, color='tab:blue')
+        plt.plot(x, eps_start, marker=9, linestyle='--', color='tab:grey', label='Epsilon Start')
+        plt.plot(x, eps_curr, marker='o', linewidth=2, color='tab:green', label='Current Epsilon')
+        plt.plot(x, eps_end, marker=8, linestyle='--', color='tab:grey', label='Epsilon End')
         plt.xlabel('Episode')
         plt.ylabel('Epsilon')
         plt.title('Epsilon Decay over Episodes')
-        plt.grid(True, linestyle='--', alpha=0.3)
+        plt.grid(True, linestyle='-', alpha=0.2)
 
         if fname:
             os.makedirs(os.path.dirname(fname), exist_ok=True)
