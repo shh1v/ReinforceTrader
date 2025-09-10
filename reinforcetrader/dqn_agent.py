@@ -49,7 +49,7 @@ class DualBranchDQN(keras.Model):
         return self._model
 
 class RLAgent:
-    def __init__(self, agent_config, reward_params: dict[str, object], test_mode: int=False, model_name: str='') -> None:
+    def __init__(self, agent_config, reward_params: dict[str, object], model_path: str | None=None) -> None:
         # Store the reward parameters which are used to compute the reward
         self._reward_params = reward_params
         
@@ -67,9 +67,14 @@ class RLAgent:
         # Define memory to store (state, action, reward, new_state) pairs for exp. replay
         buffer_length = agent_config.get('memory_buffer_len', 10000)
         self._memory = deque(maxlen=buffer_length)
-
-        self._test_mode = test_mode
-        self._model_name = model_name
+        
+        # Check if the model path exists
+        if not (model_path is None or os.path.exists(model_path)):
+            raise FileNotFoundError(f"Model file at {model_path} does not exist")
+        
+        # Store the model name for pre loading a model
+        self._model_path = model_path
+        
 
         # Define parameters for behaviour policy and temporal learning
         self._gamma = agent_config.get('gamma', 0.95)  # discount factor
@@ -82,10 +87,15 @@ class RLAgent:
         
         n_updates = agent_config.get('decay_updates', 25000) # No. of updates to minimum epsilon
         self._epsilon_decay = (self._epsilon_min / self._epsilon) ** (1.0 / n_updates)
+        learning_rate = agent_config.get('learning_rate', 1e-3)
+
 
         # Load model or define new
-        learning_rate = agent_config.get('learning_rate', 1e-3)
-        self._model = keras.models.load_model(model_name) if self._test_mode else self._init_model(learning_rate)
+        if self._model_path is not None:
+            print(f"Loading model from {self._model_path}")
+            self._model = keras.models.load_model(model_path)
+        else:
+            self._model = self._init_model(learning_rate)
         
         # Init target network update and frequency
         self._init_target_network()
@@ -160,13 +170,13 @@ class RLAgent:
 
         return loss
 
-    def act(self, state_matrix: np.ndarray, prev_pos: int) -> int:
+    def act(self, state_matrix: np.ndarray, prev_pos: int, test_agent: bool=False) -> int:
         if prev_pos not in {0, 1}:
             raise ValueError(f'Invalid trade position: {prev_pos}')
         
         # Defines an epsilon-greedy behaviour policy
         # Pick random action epsilon times
-        if not self._test_mode and np.random.random() < self._epsilon:
+        if not test_agent and np.random.random() < self._epsilon:
             if prev_pos == 0:
                 # A_{Out of trade}: {0: buy, 1: hold-out}
                 return np.random.randint(0, 2)
@@ -371,7 +381,7 @@ class RLAgent:
                                 train_loss += loss
                                 
                             # Decay epsilon slowly until min
-                            if self._epsilon > self._epsilon_min and not self._test_mode:
+                            if self._epsilon > self._epsilon_min:
                                 self._epsilon *= self._epsilon_decay 
                     
                     # Advance to the next state
@@ -420,9 +430,7 @@ class RLAgent:
 
 
     def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]):
-        # switch to test mode for validation
-        prev_test_mode = self._test_mode
-        self._test_mode = True
+        # NOTE: Assumes no exploration and only exploitation
 
         total_reward = 0.0
         total_trades = 0
@@ -440,9 +448,8 @@ class RLAgent:
             entry_price = None
 
             for t in range(t0, L - 1):
-                action = self.act(state, prev_pos)
+                action = self.act(state, prev_pos, test_agent=True)
                 curr_price = float(state_loader.get_state_OHLCV('validate', episode_id, ticker, t)[3])
-                next_price = float(state_loader.get_state_OHLCV('validate', episode_id, ticker, t + 1)[3])
                 
                 ex_ret_t = state_loader.get_reward_computes('validate', episode_id, ticker, t)
                 reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
@@ -466,8 +473,6 @@ class RLAgent:
                 # Advance to the next state
                 state =  next_state
                 prev_pos = pos_t
-
-        self._test_mode = prev_test_mode
 
         hit_rate = wins / max(wins + losses, 1)
         return {
@@ -548,16 +553,13 @@ class RLAgent:
         }
 
     def test(self, state_loader: EpisodeStateLoader, episode_id: int, test_config: dict[str, Any]):
-        # ensure pure evaluation
-        prev_test_mode = self._test_mode
-        self._test_mode = True
-
+        # NOTE: Assumes no exploration and only exploitation
         tickers_all = state_loader.get_all_tickers()
 
         # Keep a single ordered list of tickers and parallel lists of series for safe alignment
-        col_keys = []            # ["AAPL", "MSFT", ...] in deterministic order
-        sig_series_list = []     # [Series-of-dicts, ...]
-        px_series_list  = []     # [Series-of-floats, ...]
+        col_keys = [] # ["AAPL", "MSFT", ...] in deterministic order
+        sig_series_list = [] # [Series-of-dicts, ...]
+        px_series_list  = [] # [Series-of-floats, ...]
 
         for ticker in tqdm(tickers_all, desc=f'Testing episode {int(episode_id)}', ncols=100):
             L = state_loader.get_episode_len('test', episode_id, ticker)
@@ -579,15 +581,15 @@ class RLAgent:
             # warm-up rows: force hold-out until we have a full window
             for t in range(0, t0):
                 close_px[t] = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
-                sig_cells[t] = self._action_to_onehot(1)
+                sig_cells[t] = self._action_to_onehot(1) # type: ignore
 
             # main loop
             for t in range(t0, L - 1):
                 curr_close = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
                 close_px[t] = curr_close
 
-                action = self.act(state, prev_pos)
-                sig_cells[t] = self._action_to_onehot(action)
+                action = self.act(state, prev_pos, test_agent=True)
+                sig_cells[t] = self._action_to_onehot(action) # type: ignore
 
                 # Compute weather 
                 if prev_pos == 0 and action == 0:
@@ -610,10 +612,9 @@ class RLAgent:
             if sig_cells[L - 1] is None:
                 if prev_pos == 0:
                     # out of trade -> hold-out
-                    sig_cells[L - 1] = self._action_to_onehot(1)
-                else:
+                    sig_cells[L - 1] = self._action_to_onehot(1) # type: ignore
                     # in trade -> sell
-                    sig_cells[L - 1] = self._action_to_onehot(2)
+                    sig_cells[L - 1] = self._action_to_onehot(2) # type: ignore
 
             # Stash in ordered lists
             col_keys.append(ticker)
@@ -632,9 +633,6 @@ class RLAgent:
             # Set columns to a simple Index of tickers
             signals_df.columns = pd.Index(col_keys, name="Ticker")
             prices_df.columns  = pd.Index(col_keys, name="Ticker")
-
-        # restore mode
-        self._test_mode = prev_test_mode
 
         # Save artifacts
         out_dir = test_config.get("outputs_dir")
