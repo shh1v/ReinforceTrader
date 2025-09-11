@@ -212,27 +212,20 @@ class RLAgent:
         next_context_batch = np.empty((B, W*C + 1), dtype=np.float32)
         actions = np.empty((B,), dtype=np.int32)
         rewards = np.empty((B,), dtype=np.float32)
-        dones = np.empty((B,), dtype=np.float32)
 
-        for i, (state, prev_pos, action, reward, next_state, next_prev_pos, done) in enumerate(batch):
+        for i, (state, prev_pos, action, reward, next_state, next_prev_pos) in enumerate(batch):
             # Extract state components for feeding to DQN braches
+            # Compute the current state features for dual branch
             motif = state[:, :M].astype(np.float32)
             ctx = state[:, M:].astype(np.float32).reshape(-1)
             motif_batch[i] = motif
             context_batch[i] = np.concatenate([ctx, np.array([prev_pos], dtype=np.float32)], axis=0)
-
-            # If no next_state, set done flag to True
-            # Note: done is True or next_state is None only for each ticker's episode end
-            if next_state is None:
-                next_motif_batch[i] = motif
-                next_context_batch[i] = context_batch[i]
-                dones[i] = 1.0
-            else:
-                next_motif = next_state[:, :M].astype(np.float32)
-                next_ctx = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
-                next_motif_batch[i] = next_motif
-                next_context_batch[i] = np.concatenate([next_ctx, np.array([next_prev_pos], dtype=np.float32)], axis=0)
-                dones[i] = 1.0 if done else 0.0
+            
+            # Compute the next state features for dual branch
+            next_motif = next_state[:, :M].astype(np.float32)
+            next_ctx = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
+            next_motif_batch[i] = next_motif
+            next_context_batch[i] = np.concatenate([next_ctx, np.array([next_prev_pos], dtype=np.float32)], axis=0)
 
             actions[i] = action
             rewards[i] = reward
@@ -247,7 +240,7 @@ class RLAgent:
         a_star = np.argmax(q_next_online, axis=1)
         max_q_next = q_next_target[np.arange(B), a_star].astype(np.float32)
         
-        returns = rewards + (1.0 - dones) * (self._gamma * max_q_next)
+        returns = rewards + (self._gamma * max_q_next)
         targets = q_current.copy()
         targets[np.arange(B), actions] = returns
 
@@ -328,6 +321,11 @@ class RLAgent:
         os.makedirs(train_config['plots_dir'], exist_ok=True)
         os.makedirs(train_config['logs_dir'], exist_ok=True)
 
+        # Extract training parameters from config
+        replay_start_size = train_config.get('replay_start_size', 5000)
+        train_interval = train_config.get('train_interval', 1)
+        batch_size = train_config.get('batch_size', 256)
+        
         logs_by_episode = {}
 
         tickers_all = state_loader.get_all_tickers()
@@ -349,6 +347,7 @@ class RLAgent:
                 if L < self._window_size + 1:
                     # skip tickers that don't have enough data for a window and next step
                     # Not the case for the current episode configuration file
+                    print(f'Warning: skipping Ep: {e} of Ticker: {ticker} due to insufficient data')
                     continue
 
                 # Train on this ticker for the episode (standard rollout with replay)
@@ -364,21 +363,19 @@ class RLAgent:
                     reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
 
                     next_state = state_loader.get_state_matrix('train', e, ticker, t + 1, self._window_size)
-                    done = (t == L - 2)
 
                     # store transition
-                    self._memory.append((state, prev_pos, action, reward, next_state, pos_t, done))
+                    self._memory.append((state, prev_pos, action, reward, next_state, pos_t))
 
                     # Update env steps taken
                     env_steps += 1
                     
                     # train from replay if enough samples; accumulate training loss for this group
-                    if len(self._memory) >= train_config.get('replay_start_size', 5000):
+                    if len(self._memory) >= replay_start_size:
                         # Train every train_interval steps
-                        if env_steps % train_config.get('train_interval', 1) == 0:
-                            for _ in range(train_config.get('gradient_step_repeat', 1)):
-                                loss = self.exp_replay(train_config.get('batch_size', 256))
-                                train_loss += loss
+                        if env_steps % train_interval == 0:
+                            loss = self.exp_replay(batch_size)
+                            train_loss += loss
                                 
                             # Decay epsilon slowly until min
                             if self._epsilon > self._epsilon_min:
@@ -389,9 +386,13 @@ class RLAgent:
                     prev_pos = pos_t
 
             # Run validation on this episode's validation set
-            val_results = self._run_validation(state_loader, e, tickers_all)
-            val_loss = -val_results['sum_reward']
-            print(f"Episode {e} summary: Train loss: {train_loss:.4f}, Val loss: {val_loss:.4f}, Total val trades: {val_results['total_trades']}, Hit rate: {val_results['hit_rate']:.3f}")
+            val_result = self._run_validation(state_loader, e, tickers_all)
+            
+            # Print the validation summary
+            print(f"Episode {e} validation summary:")
+            print(f"Train loss: {train_loss:.4f}, Val loss: {-val_result['sum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
+            print(f"Trade Duration: {val_result['trade_duration']:.2f}, Total PnL: {val_result['total_pnl']:.2f}, Profit Factor: {val_result['profit_factor']:.3f}")
+            print(f"Force End Trade Count: {val_result['force_end_trades']}, Force End PnL: {val_result['force_end_pnl']:.2f}")
             
             # Boost the epsilon a bit for next episode (as every episode has diff regimes)
             epsilon_end = self._epsilon
@@ -400,7 +401,7 @@ class RLAgent:
             # Store logs for this episode
             logs_by_episode[int(e)] = {
                 "train_loss": train_loss,
-                "val_results": val_results,
+                "val_results": val_result,
                 "epsilon_start": epsilon_start,
                 "epsilon_current": self._epsilon,
                 "epsilon_end": epsilon_end
@@ -433,9 +434,18 @@ class RLAgent:
         # NOTE: Assumes no exploration and only exploitation
 
         total_reward = 0.0
+        
         total_trades = 0
-        wins = 0
-        losses = 0
+        winning_trade_count = 0
+        losing_trade_count = 0
+        gross_profit = 0.0
+        gross_loss = 0.0
+        in_trade_days = 0
+        
+        # Track trades that had to be forcefully closed as episode ends
+        # Tells us the distorition in performance metrics
+        force_end_trades = 0
+        force_end_pnl = 0.0
 
         for ticker in tickers:
             L = state_loader.get_episode_len('validate', episode_id, ticker)
@@ -456,16 +466,32 @@ class RLAgent:
                 
                 total_reward += reward
 
-                # simple trade bookkeeping
+                # Trade performance tracking
+                if pos_t == 1:
+                    # Track how many days the agent is in trade
+                    in_trade_days += 1
+
                 if prev_pos == 0 and pos_t == 1:
                     entry_price = curr_price
                     total_trades += 1
-                if prev_pos == 1 and pos_t == 0 and entry_price is not None:
+                elif prev_pos == 1 and (pos_t == 0 or t == L - 2):
+                    if entry_price is None:
+                        raise ValueError("Entry price should not be None when exiting a trade")
+                    
+                    # Compute trade pnl
                     trade_pnl = curr_price - entry_price
+                    
+                    # Count how many trades had to be forcefully closed at the end
+                    if t == L - 2:
+                        force_end_trades += 1
+                        force_end_pnl += trade_pnl
+                    
                     if trade_pnl >= 0:
-                        wins += 1
+                        gross_profit += trade_pnl
+                        winning_trade_count += 1
                     else:
-                        losses += 1
+                        gross_loss += trade_pnl
+                        losing_trade_count += 1
                     entry_price = None
 
                 next_state = state_loader.get_state_matrix('validate', episode_id, ticker, t + 1, self._window_size)
@@ -474,11 +500,21 @@ class RLAgent:
                 state =  next_state
                 prev_pos = pos_t
 
-        hit_rate = wins / max(wins + losses, 1)
+        # WARNING: Metrics consider forcefully ended trades which could skew performance
+        total_pnl = gross_profit + gross_loss
+        hit_rate = winning_trade_count / max(total_trades, 1)
+        trade_duration = in_trade_days / max(total_trades, 1)
+        profit_factor = gross_profit / max(gross_loss, 1e-12)
+        
         return {
-            "sum_reward": float(total_reward),
-            "total_trades": int(total_trades),
-            "hit_rate": float(hit_rate),
+            'sum_reward': total_reward,
+            'total_trades': total_trades,
+            'trade_duration': trade_duration,
+            'hit_rate': hit_rate,
+            'total_pnl': total_pnl,
+            'profit_factor': profit_factor,
+            'force_end_trades': force_end_trades,
+            'force_end_pnl': force_end_pnl
         }
 
     def _plot_epsilon_decay(self, eps_start, eps_curr, eps_end: list[float], fname: str | None = None, show: bool = True):
