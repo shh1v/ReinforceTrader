@@ -139,7 +139,7 @@ class RLAgent:
         # Check the state matrix shape is correct
         total_features = self._num_motif_feat + self._num_context_feat
         if state_matrix.shape != (self._window_size, total_features):
-            raise KeyError(f'Invalid state matrix shape: {state_matrix.shape}')
+            raise ValueError(f'Invalid state matrix shape: {state_matrix.shape}')
         
         # Define the motif input
         # Expand dims from [window, num_features] to [batch_size=1, window, num_features]
@@ -163,13 +163,6 @@ class RLAgent:
 
         return q_values
     
-    def fit_model(self, state_matrix: np.ndarray, prev_pos: int, target_q: np.ndarray) -> float:
-        # Compute MSE loss between actual and target q values
-        model_input = self._get_states(state_matrix, prev_pos)
-        loss = self._model.fit(model_input, target_q, epochs=1, verbose=0)    
-
-        return loss
-
     def act(self, state_matrix: np.ndarray, prev_pos: int, test_agent: bool=False) -> int:
         if prev_pos not in {0, 1}:
             raise ValueError(f'Invalid trade position: {prev_pos}')
@@ -187,14 +180,14 @@ class RLAgent:
         # Pick action from DQN 1 - epsilon% times
         # mask is used to restrict action space
         if prev_pos == 0:
-            mask = np.array([0, 0, -float('inf'), -float('inf')])
+            mask = np.array([0, 0, -np.inf, -np.inf])
         else:
-            mask = np.array([-float('inf'), -float('inf'), 0, 0])
+            mask = np.array([-np.inf, -np.inf, 0, 0])
             
         q_values = self.get_q_values(state_matrix, prev_pos)
         restricted_q_values = mask + q_values
         
-        return int(np.argmax(restricted_q_values))
+        return int(np.argmax(restricted_q_values[0]))
 
     def exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
@@ -212,8 +205,11 @@ class RLAgent:
         next_context_batch = np.empty((B, W*C + 1), dtype=np.float32)
         actions = np.empty((B,), dtype=np.int32)
         rewards = np.empty((B,), dtype=np.float32)
+        
+        # Create a mask to restrict the action space
+        mask_next = np.empty((B, self._action_size), dtype=np.float32)
 
-        for i, (state, prev_pos, action, reward, next_state, next_prev_pos) in enumerate(batch):
+        for i, (state, prev_pos, action, reward, next_state, pos_t) in enumerate(batch):
             # Extract state components for feeding to DQN braches
             # Compute the current state features for dual branch
             motif = state[:, :M].astype(np.float32)
@@ -225,15 +221,30 @@ class RLAgent:
             next_motif = next_state[:, :M].astype(np.float32)
             next_ctx = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
             next_motif_batch[i] = next_motif
-            next_context_batch[i] = np.concatenate([next_ctx, np.array([next_prev_pos], dtype=np.float32)], axis=0)
+            next_context_batch[i] = np.concatenate([next_ctx, np.array([pos_t], dtype=np.float32)], axis=0)
 
+            # Add the appropriate mask based on pos_t
+            if pos_t == 0:
+                # Only allow buy, hold-out when not in trade
+                mask_next[i] = np.array([0, 0, -np.inf, -np.inf])
+            else:
+                # Only allow sell, hold-in when in trade
+                mask_next[i] = np.array([-np.inf, -np.inf, 0, 0])
+            
+            # Set the action and reward
             actions[i] = action
             rewards[i] = reward
 
+        # Build a mask to 
+        
         q_current = self._model.predict({"motif_input": motif_batch, "context_input": context_batch}, verbose=0)
         q_next_online = self._model.predict({"motif_input": next_motif_batch, "context_input": next_context_batch}, verbose=0)
         q_next_target = self._target_model.predict({"motif_input": next_motif_batch, "context_input": next_context_batch}, verbose=0)
 
+        # Apply the mask on the q_next table to restrict action choosing
+        q_next_online += mask_next
+        q_next_target += mask_next
+        
         # Compute and update to the ideal or target q table
         # Note: use online table to get max action for next state
         # Then, use the target table q value for that next state and max action
@@ -504,7 +515,7 @@ class RLAgent:
         total_pnl = gross_profit + gross_loss
         hit_rate = winning_trade_count / max(total_trades, 1)
         trade_duration = in_trade_days / max(total_trades, 1)
-        profit_factor = gross_profit / max(gross_loss, 1e-12)
+        profit_factor = gross_profit / max(abs(gross_loss), 1e-12)
         
         return {
             'sum_reward': total_reward,
@@ -521,9 +532,9 @@ class RLAgent:
         x = np.arange(1, len(eps_curr) + 1)
 
         plt.figure(figsize=(8, 4))
-        plt.plot(x, eps_start, marker=9, linestyle='--', color='tab:grey', label='Epsilon Start')
+        plt.plot(x, eps_start, marker=9, linestyle='--', color='tab:gray', label='Epsilon Start')
         plt.plot(x, eps_curr, marker='o', linewidth=2, color='tab:green', label='Current Epsilon')
-        plt.plot(x, eps_end, marker=8, linestyle='--', color='tab:grey', label='Epsilon End')
+        plt.plot(x, eps_end, marker=8, linestyle='--', color='tab:gray', label='Epsilon End')
         plt.xlabel('Episode')
         plt.ylabel('Epsilon')
         plt.title('Epsilon Decay over Episodes')
@@ -580,7 +591,7 @@ class RLAgent:
             plt.close()
 
     def _action_to_onehot(self, a: int) -> dict:
-        # 0: buy, 1: hold-in, 2: sell, 3: hold-out
+        # 0: buy, 1: hold-out, 2: sell, 3: hold-in
         return {
             "buy":  1 if a == 0 else 0,
             "hold-out":  1 if a == 1 else 0,
@@ -649,6 +660,7 @@ class RLAgent:
                 if prev_pos == 0:
                     # out of trade -> hold-out
                     sig_cells[L - 1] = self._action_to_onehot(1) # type: ignore
+                else:
                     # in trade -> sell
                     sig_cells[L - 1] = self._action_to_onehot(2) # type: ignore
 
