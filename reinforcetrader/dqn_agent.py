@@ -618,19 +618,19 @@ class RLAgent:
 
             # Prepare iteration
             t0 = self._window_size - 1
-            state    = state_loader.get_state_matrix('test', episode_id, ticker, t0, self._window_size)
+            state = state_loader.get_state_matrix('test', episode_id, ticker, t0, self._window_size)
             prev_pos = 0
 
             # allocate containers (length L to match idx)
             sig_cells = [None] * L
             close_px  = np.empty(L, dtype=np.float32)
 
-            # warm-up rows: force hold-out until we have a full window
+            # warm-up rows: As state is not available, set signals and close to NaN
             for t in range(0, t0):
-                close_px[t] = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
-                sig_cells[t] = self._action_to_onehot(1) # type: ignore
+                close_px[t] = np.nan
+                sig_cells[t] = np.nan # type: ignore
 
-            # main loop
+            # main test loop
             for t in range(t0, L - 1):
                 curr_close = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
                 close_px[t] = curr_close

@@ -1,5 +1,6 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+from pprint import pformat
 
 class PortfolioBackTester:
     def __init__(self, signals: pd.DataFrame, prices: pd.DataFrame):
@@ -17,29 +18,38 @@ class PortfolioBackTester:
         self._strategy_returns = None
     
     def _compute_strat_returns(self):
-        # Compute the returns as percentage change
-        self._returns = self._prices.pct_change().shift(-1).iloc[:-1]
-        self._signals = self._signals.iloc[:-1]
+        # First, drop any rows wihout signal dict (NaN)
+        self._signals = self._signals.dropna()
+        self._prices = self._prices.loc[self._signals.index]
+        
+        # Compute the daily returns and align the index
+        self._returns = self._prices.pct_change().shift(-1).dropna()
+        self._signals = self._signals.loc[self._returns.index]
         
         # Compute daily in trade signals
         self._in_trade = pd.DataFrame(index=self._signals.index, columns=self._signals.columns, dtype=bool)
         
         for i in range(len(self._signals)):
+            # Get the signal dict for the day for each ticker
             signal_dicts = self._signals.iloc[i].to_list()
-            if i == 0:
-                prev_in_trade = [False] * len(signal_dicts)
+            
+            # Find weather we are in trade or not
+            if i > 0:
+                daily_in_trades = self._in_trade.iloc[i - 1].tolist()
             else:
-                prev_in_trade = self._in_trade.iloc[i-1].tolist()
-
+                daily_in_trades = [False] * self._signals.shape[1]
+                
             row_pos = []
-            for prev, sig in zip(prev_in_trade, signal_dicts):
-                if sig["buy"] == 1:
+            for prev, sig in zip(daily_in_trades, signal_dicts):
+                if isinstance(sig, dict) and sig.get('buy', 0) == 1:
                     row_pos.append(True)
-                elif sig["sell"] == 1:
+                elif isinstance(sig, dict) and sig.get('sell', 0) == 1:
                     row_pos.append(False)
-                else:  # hold
+                else:  # hold-in or hold-out (or malformed cell)
                     row_pos.append(prev)
-            self._in_trade.iloc[i] = row_pos
+
+            self._in_trade.iloc[i] = pd.Series(row_pos, index=self._in_trade.columns)
+
         
         # Compute the cumulative trade returns
         daily_strategy_returns = (self._returns * self._in_trade.astype(float)).mean(axis=1)
@@ -72,7 +82,7 @@ class PortfolioBackTester:
         plt.grid()
         plt.show()
     
-    def get_performance_metrics(self) -> dict[str, float]:
+    def get_performance_metrics(self) -> str:
         if self._strategy_returns is None:
             raise ValueError("You must run the backtest before computing performance metrics.")
         
@@ -93,7 +103,7 @@ class PortfolioBackTester:
         baseline_drawdown = (self._baseline_returns - baseline_rolling_max) / baseline_rolling_max
         baseline_max_drawdown = baseline_drawdown.min()
         
-        return {
+        metrics = {
             "Total Return": total_return,
             "Annualized Return": annualized_return,
             "Max Drawdown": max_drawdown,
@@ -101,4 +111,5 @@ class PortfolioBackTester:
             "Baseline Annualized Return": baseline_annualized_return,
             "Baseline Max Drawdown": baseline_max_drawdown
         }
-    
+        
+        return pformat(metrics)
