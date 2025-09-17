@@ -407,10 +407,10 @@ class RLAgent:
             
             # Boost the epsilon a bit for next episode (as every episode has diff regimes)
             epsilon_end = self._epsilon
-            self._epsilon = epsilon_start + self._epsilon_boost_factor * (epsilon_start - epsilon_end)
+            self._epsilon = epsilon_end + self._epsilon_boost_factor * (epsilon_start - epsilon_end)
             
             # Store logs for this episode
-            logs_by_episode[int(e)] = {
+            logs_by_episode[e] = {
                 "train_loss": train_loss,
                 "val_results": val_result,
                 "epsilon_start": epsilon_start,
@@ -441,7 +441,7 @@ class RLAgent:
         return logs_by_episode
 
 
-    def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]):
+    def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]) -> dict[str, int | float]:
         # NOTE: Assumes no exploration and only exploitation
 
         total_reward = 0.0
@@ -475,7 +475,7 @@ class RLAgent:
                 ex_ret_t = state_loader.get_reward_computes('validate', episode_id, ticker, t)
                 reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
                 
-                total_reward += reward
+                total_reward += float(reward)
 
                 # Trade performance tracking
                 if pos_t == 1:
@@ -608,7 +608,7 @@ class RLAgent:
         sig_series_list = [] # [Series-of-dicts, ...]
         px_series_list  = [] # [Series-of-floats, ...]
 
-        for ticker in tqdm(tickers_all, desc=f'Testing episode {int(episode_id)}', ncols=100):
+        for ticker in tqdm(tickers_all, desc=f'Testing episode {episode_id}', ncols=100):
             L = state_loader.get_episode_len('test', episode_id, ticker)
             if L < self._window_size + 1:
                 continue

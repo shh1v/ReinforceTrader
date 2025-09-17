@@ -22,9 +22,6 @@ class RawDataLoader:
             raise ValueError('Tickers and index cannot be provided simultaneously.')
         elif not tickers and not index:
             raise ValueError('Either tickers or index must be provided.')
-                
-        # Only load from cache if tickers are fetched from index
-        load_from_cache = False
         
         # Fetch all the tickers in index if specific tickers are not provided
         if not tickers:
@@ -32,6 +29,11 @@ class RawDataLoader:
             load_from_cache = True
             tickers = self._fetch_tickers(index=self._index)
             benchmark_ticker = '^DJI' if index == 'DJI' else '^SPX'
+        else:
+            # Only load from cache if tickers are fetched from index
+            load_from_cache = False
+            benchmark_ticker = None
+            
             
 
         # Load all the ticker price and volume data
@@ -188,7 +190,7 @@ class FeatureBuilder:
         # Include motif feature to identify candlestick patterns
         motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL', 'Gap', 'GapFill']
         # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
-        technical_f = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
+        technical_f = ['EMA5/EMA13', 'EMA13/EMA26', 'EMA26/EMA50', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
         feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + ex_ret_f + motif_f + technical_f],
@@ -239,6 +241,11 @@ class FeatureBuilder:
                     (h - np.maximum(o, c)) / candle_height
             ).clip(0.0, 1.0)
 
+            # Lower shadow relative to range
+            self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
+                (np.minimum(o, c) - l) / candle_height
+            ).clip(0.0, 1.0)
+            
             # Gap and Gap fill relative to the previous close
             pc = c.shift(1)
             gap_raw = o - pc
@@ -256,21 +263,18 @@ class FeatureBuilder:
             # Assign computed gap metrics in features data
             self._features_data.loc[:, (ticker, 'Gap')] = self._norm(gap)
             self._features_data.loc[:, (ticker, 'GapFill')] = gap_fill.clip(0.0, 1.0)
-            
-            # Lower shadow relative to range
-            self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
-                (np.minimum(o, c) - l) / candle_height
-            ).clip(0.0, 1.0)
 
             # Compute rolling Exponential Moving Averages: 5, 13, 26
             ema5 = EMAIndicator(close=c, window=5).ema_indicator()
             ema13 = EMAIndicator(close=c, window=13).ema_indicator()
             ema26 = EMAIndicator(close=c, window=26).ema_indicator()
+            ema50 = EMAIndicator(close=c, window=50).ema_indicator()
 
             # Compute the EMA ratios
-            self._features_data.loc[:, (ticker, 'C/EMA5')] = self._norm((c / ema5) - 1)
             self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = self._norm((ema5 / ema13) - 1)
             self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = self._norm((ema13 / ema26) - 1)
+            self._features_data.loc[:, (ticker, 'EMA26/EMA50')] = self._norm((ema26 / ema50) - 1)
+
 
             # Compute Bollinger Bands (%B and Bandwidth)
             bb = BollingerBands(c, window=20, window_dev=2)
@@ -284,9 +288,9 @@ class FeatureBuilder:
             self._features_data.loc[:, (ticker, 'B%B')] = (c - bb_lower) / bb_width
             self._features_data.loc[:, (ticker, 'BBW')] = self._norm(bb_width / bb_sma20)
 
-            # Compute Relative Strength Index (RSI) scaled bw [-1, 1]
+            # Compute Relative Strength Index (RSI)
             rsi = RSIIndicator(c, window=14).rsi()
-            self._features_data.loc[:, (ticker, 'RSI')] = (rsi - 50) / 50
+            self._features_data.loc[:, (ticker, 'RSI')] = self._norm(rsi)
 
             # Compute Average Directional Index scaled bw [0, 1]
             adx = ADXIndicator(high=h, low=l, close=c, window=14).adx()
