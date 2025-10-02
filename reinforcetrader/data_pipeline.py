@@ -10,11 +10,12 @@ from ta.momentum import RSIIndicator
 
 
 class RawDataLoader:
-    def __init__(self, start_date: str, end_date: str, tickers=[], index: str=''):
+    def __init__(self, start_date: str, end_date: str, tickers=[], index: str='', verbose=True):
         # Store the start and end dates of data to be downloaded/load from cache
         self._start_date = start_date
         self._end_date = end_date
         self._index = index
+        self._verbose = verbose
 
         # Make sure there is no conflict between tickers and index
         if tickers and index:
@@ -22,17 +23,25 @@ class RawDataLoader:
         elif not tickers and not index:
             raise ValueError('Either tickers or index must be provided.')
         
-        # If tickers are provided, do not load them from cache
-        load_from_cache = False
-                
         # Fetch all the tickers in index if specific tickers are not provided
         if not tickers:
             # Prefer loading from cache to avoid API calls
             load_from_cache = True
             tickers = self._fetch_tickers(index=self._index)
+            benchmark_ticker = '^DJI' if index == 'DJI' else '^SPX'
+        else:
+            # Only load from cache if tickers are fetched from index
+            load_from_cache = False
+            benchmark_ticker = None
+            
+            
 
         # Load all the ticker price and volume data
-        self._hist_data = self._load_hist_prices(tickers, load_from_cache=load_from_cache)
+        self._ticker_data = self._load_hist_prices(tickers, load_from_cache=load_from_cache)
+        if benchmark_ticker:
+            self._benchmark_data = self._download_hist_prices([benchmark_ticker], save=False)
+        else:
+            self._benchmark_data = None
             
     def _fetch_tickers(self, index: str='DJI') -> list:
         if index == 'DJI':
@@ -67,15 +76,20 @@ class RawDataLoader:
         # Drop all tickers that have NaN values
         data = data.drop(columns=tickers_to_drop, level=0)
         columns_left = data.columns.get_level_values('Ticker').nunique()
-        print(f'Dropped {len(tickers_to_drop)} tickers. {columns_left} tickers left.')
-        print(f"Tickers dropped: {', '.join(tickers_to_drop)}")
+        if self._verbose:
+            print(f'Dropped {len(tickers_to_drop)} tickers. {columns_left} tickers left.')
+            print(f"Tickers dropped: {', '.join(tickers_to_drop)}")
+        
+        # Drop the multi-column index if only one ticker is present
+        if columns_left == 1:
+            data.columns = data.columns.droplevel('Ticker')
 
         return data
 
 
     def _download_hist_prices(self, tickers: list, save: bool, save_path=None) -> pd.DataFrame:
         # Download data from yfinance
-        data = yf.download(tickers=tickers, start=self._start_date, end=self._end_date, auto_adjust=True)
+        data = yf.download(tickers=tickers, start=self._start_date, end=self._end_date, auto_adjust=True, progress=self._verbose, threads=True)
 
         # Reorder multi-column index to ['Ticker', 'Price']
         data = data.reorder_levels(['Ticker', 'Price'], axis=1)
@@ -86,7 +100,8 @@ class RawDataLoader:
         # Save the data locally to reduce API calls
         if save:
             data.to_csv(save_path)
-            print(f"Data saved to {save_path}")
+            if self._verbose:
+                print(f"Data saved to {save_path}")
 
         return data
 
@@ -99,24 +114,34 @@ class RawDataLoader:
 
         # If cached file exists, load and return
         if load_from_cache and file_path.exists():
-            print(f"Loading cached data from {file_path}")
+            if self._verbose:
+                print(f"Loading cached data from {file_path}")
             return pd.read_csv(file_path, header=[0, 1], index_col=0, parse_dates=True)
-            
-        print(f'Downloading from yfinance as cached data does not exist in {cache_path}')
+        
+        if self._verbose:
+            print(f'Downloading from yfinance as cached data does not exist in {cache_path}')
         return self._download_hist_prices(tickers, save=load_from_cache, save_path=file_path)
 
     def get_hist_prices(self, tickers: list=[]):
         # Only return selected columns
         if tickers:
-            return self._hist_data[tickers]
+            return self._ticker_data[tickers], self._benchmark_data
         
-        return self._hist_data
+        return self._ticker_data, self._benchmark_data
 
 class FeatureBuilder:
-    def __init__(self, hist_prices, index='DJI'):
-        self._hist_prices = hist_prices.sort_index()
-        self._features_data = None
+    def __init__(self, ticker_data, benchmark_data: pd.DataFrame, return_horizons: list[int], index: str='DJI') -> None:
+        if ticker_data.empty or benchmark_data.empty:
+            raise ValueError('Ticker data and benchmark data cannot be empty.')
+        
+        self._ticker_data = ticker_data.sort_index()
+        self._benchmark_data = benchmark_data.sort_index()
+        
+        self._return_horizons = return_horizons
         self._index = index
+        
+        self._features_data = None
+        self._feature_indices = None
 
     def _save_features_data(self, save_dir='data/processed') -> bool:
         if self._features_data is None or self._features_data.empty:
@@ -144,91 +169,137 @@ class FeatureBuilder:
 
     
     def _norm(self, feature_data: pd.Series, window=126) -> pd.Series:
-        mean = feature_data.rolling(window=window).mean()
-        std = feature_data.rolling(window=window).std()
-        return (feature_data - mean) / (std + 1e-12)
+        # Compute rolling mean and std
+        mean = feature_data.rolling(window=window, min_periods=window).mean()
+        std = feature_data.rolling(window=window, min_periods=window).std()
+        
+        # Avoid division by zero by replacing with machine epsilon if zero
+        std = std.mask(std < np.finfo(float).eps, np.finfo(float).eps)
+        
+        return (feature_data - mean) / std
     
     def build_features(self, save=True):
         # Get tickers symbols
-        tickers = self._hist_prices.columns.get_level_values('Ticker').unique()
+        tickers = self._ticker_data.columns.get_level_values('Ticker').unique()
 
         # Predefine feature names
         # Include OHLCV for reward fn, portfolio managment, and more
         OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
+        # Include excess returns over specifiied horizons
+        ex_ret_f = [f'ExRet{h}' for h in self._return_horizons]
         # Include motif feature to identify candlestick patterns
-        motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL']
+        motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL', 'Gap', 'GapFill']
         # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
-        technical_f = ['C/EMA5', 'EMA5/EMA13', 'EMA13/EMA26', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
+        technical_f = ['EMA5/EMA13', 'EMA13/EMA26', 'EMA26/EMA50', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
-        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + motif_f + technical_f],
+        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + ex_ret_f + motif_f + technical_f],
                                                      names=['Ticker', 'Feature'])
-        self._features_data = pd.DataFrame(index=self._hist_prices.index, columns=feature_columns, dtype=float)
-
+        self._features_data = pd.DataFrame(index=self._ticker_data.index, columns=feature_columns, dtype=float)
+        
+        # Compute benchmark returns for excess return calculation
+        bc = self._benchmark_data['Close']
+        benchmark_returns = {h: np.log(bc.shift(-h) / bc) for h in self._return_horizons}
+        
         for ticker in tqdm(tickers, ncols=100, desc='Building ticker features'):
-            open = self._hist_prices[ticker]['Open']
-            high = self._hist_prices[ticker]['High']
-            low = self._hist_prices[ticker]['Low']
-            close = self._hist_prices[ticker]['Close']
-            volume = self._hist_prices[ticker]['Volume']
+            o = self._ticker_data[ticker]['Open']
+            h = self._ticker_data[ticker]['High']
+            l = self._ticker_data[ticker]['Low']
+            c = self._ticker_data[ticker]['Close']
+            v = self._ticker_data[ticker]['Volume']
 
             # Keep OHLCV as is (may not be part of state representation)
-            self._features_data.loc[:, (ticker, 'Open')] = open
-            self._features_data.loc[:, (ticker, 'High')] = high
-            self._features_data.loc[:, (ticker, 'Low')] = low
-            self._features_data.loc[:, (ticker, 'Close')] = close
-            self._features_data.loc[:, (ticker, 'Volume')] = volume
+            self._features_data.loc[:, (ticker, 'Open')] = o
+            self._features_data.loc[:, (ticker, 'High')] = h
+            self._features_data.loc[:, (ticker, 'Low')] = l
+            self._features_data.loc[:, (ticker, 'Close')] = c
+            self._features_data.loc[:, (ticker, 'Volume')] = v
             
             # Use eps to avoid division by zero
-            eps = 1e-12
+            eps = np.finfo(float).eps
+            
+            # Compute excess returns over specified horizons
+            for hzn in self._return_horizons:
+                # Compute the log returns for the ticker
+                ticker_returns = np.log(c.shift(-hzn) / c)
+                
+                # Compute excess return and normalize
+                ex_ret = ticker_returns - benchmark_returns[hzn]
+                self._features_data.loc[:, (ticker, f'ExRet{hzn}')] = ex_ret
             
             # Compute the candle body features
             # Body relative to total range, clip for stability
-            candle_range = (high - low).replace(0, eps)
+            candle_height = (h - l)
+            candle_height = candle_height.mask(candle_height < eps, eps)
+            
             self._features_data.loc[:, (ticker, 'Body/HL')] = (
-                (close - open) / candle_range
+                (c - o) / candle_height
             ).clip(-1.0, 1.0)
 
             # Upper shadow relative to range
             self._features_data.loc[:, (ticker, 'UShadow/HL')] = (
-                    (high - np.maximum(open, close)) / candle_range
+                    (h - np.maximum(o, c)) / candle_height
             ).clip(0.0, 1.0)
 
             # Lower shadow relative to range
             self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
-                (np.minimum(open, close) - low) / candle_range
+                (np.minimum(o, c) - l) / candle_height
             ).clip(0.0, 1.0)
+            
+            # Gap and Gap fill relative to the previous close
+            pc = c.shift(1)
+            gap_raw = o - pc
+            gap = np.log(o / pc)
+            
+            # Identify positions for gap up and gap down
+            gap_up = gap_raw > 0
+            gap_down = gap_raw < 0
+
+            # Compute the gap fill %
+            gap_fill = pd.Series(0.0, index=gap.index)
+            gap_fill[gap_up] = (o - l).where(gap_up) / (gap_raw).where(gap_up)
+            gap_fill[gap_down] = (h - o).where(gap_down) / (-gap_raw).where(gap_down)
+            
+            # Assign computed gap metrics in features data
+            self._features_data.loc[:, (ticker, 'Gap')] = self._norm(gap)
+            self._features_data.loc[:, (ticker, 'GapFill')] = gap_fill.clip(0.0, 1.0)
 
             # Compute rolling Exponential Moving Averages: 5, 13, 26
-            ema5 = EMAIndicator(close=close, window=5).ema_indicator()
-            ema13 = EMAIndicator(close=close, window=13).ema_indicator()
-            ema26 = EMAIndicator(close=close, window=26).ema_indicator()
+            ema5 = EMAIndicator(close=c, window=5).ema_indicator()
+            ema13 = EMAIndicator(close=c, window=13).ema_indicator()
+            ema26 = EMAIndicator(close=c, window=26).ema_indicator()
+            ema50 = EMAIndicator(close=c, window=50).ema_indicator()
 
             # Compute the EMA ratios
-            self._features_data.loc[:, (ticker, 'C/EMA5')] = self._norm((close / ema5) - 1)
             self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = self._norm((ema5 / ema13) - 1)
             self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = self._norm((ema13 / ema26) - 1)
+            self._features_data.loc[:, (ticker, 'EMA26/EMA50')] = self._norm((ema26 / ema50) - 1)
+
 
             # Compute Bollinger Bands (%B and Bandwidth)
-            bb = BollingerBands(close, window=20, window_dev=2)
+            bb = BollingerBands(c, window=20, window_dev=2)
             bb_sma20 = bb.bollinger_mavg()
             bb_upper = bb.bollinger_hband()
             bb_lower = bb.bollinger_lband()
             bb_width = bb_upper - bb_lower
-            self._features_data.loc[:, (ticker, 'B%B')] = (close - bb_lower) / (bb_width + eps)
-            self._features_data.loc[:, (ticker, 'BBW')] = self._norm(bb_width / (bb_sma20 + eps))
+            # Avoid division by zero
+            bb_width = bb_width.mask(bb_width.abs() < eps, eps)
+            bb_sma20 = bb_sma20.mask(bb_sma20.abs() < eps, eps)
+            self._features_data.loc[:, (ticker, 'B%B')] = (c - bb_lower) / bb_width
+            self._features_data.loc[:, (ticker, 'BBW')] = self._norm(bb_width / bb_sma20)
 
-            # Compute Relative Strength Index (RSI) scaled bw [-1, 1]
-            rsi = RSIIndicator(close, window=14).rsi()
-            self._features_data.loc[:, (ticker, 'RSI')] = (rsi - 50) / 50
+            # Compute Relative Strength Index (RSI)
+            rsi = RSIIndicator(c, window=14).rsi()
+            self._features_data.loc[:, (ticker, 'RSI')] = self._norm(rsi)
 
             # Compute Average Directional Index scaled bw [0, 1]
-            adx = ADXIndicator(high=high, low=low, close=close, window=14).adx()
+            adx = ADXIndicator(high=h, low=l, close=c, window=14).adx()
             self._features_data.loc[:, (ticker, 'ADX')] = adx / 100.0
 
             # Compute ratio of current volume over 20 volume moving average
-            vol20 = volume.rolling(20, min_periods=20).mean()
-            self._features_data.loc[:, (ticker, 'V/Vol20')] = self._norm(volume / (vol20 + eps))
+            vol20 = v.rolling(20, min_periods=20).mean()
+            vol20 = vol20.mask(vol20 < eps, eps)
+            self._features_data.loc[:, (ticker, 'V/Vol20')] = self._norm(v / vol20)
         
         # Drop all rows with NaN values
         self._features_data = self._features_data.dropna()
@@ -236,9 +307,26 @@ class FeatureBuilder:
         # Save the features data to use for later
         if save:
             self._save_features_data()
+        
+        # build once at the end of build_features
+        feat_level = self._features_data.columns.get_level_values('Feature').unique()
+
+        feature_indices = {
+            'OHLCV': np.flatnonzero(feat_level.isin(OHLCV_f)),
+            'Rewards': np.flatnonzero(feat_level.isin(ex_ret_f)),
+            'State': np.flatnonzero(feat_level.isin(motif_f + technical_f))
+        }
+        
+        self._feature_indices = feature_indices
 
     def get_features(self) -> pd.DataFrame:
         if self._features_data is None:
             return pd.DataFrame()
         
         return self._features_data
+    
+    def get_feature_indices(self) -> dict:
+        if self._feature_indices is None:
+            return {}
+        
+        return self._feature_indices

@@ -67,7 +67,7 @@
       "name": "Policy-fueled expansion",
       "regime": "bull",
       "start_date": "2017-07-04",
-      "end_date": "2019-12-09",
+      "end_date": "2019-09-30",
       "description": "Rally on expectations of tax cuts, deregulation, and solid earnings. Corporate tax reform in 2017 reduced the statutory rate and supported profits. A near-bear correction occurred in Q4 2018 amid Fed tightening and U.S–China trade tensions, followed by a 2019 rebound as the Fed pivoted."
     },
     {
@@ -75,8 +75,8 @@
       "episode_id": 1,
       "name": "Mixed: COVID shock, rebound, inflation tightening",
       "regime": "mixed",
-      "start_date": "2019-12-10",
-      "end_date": "2025-08-11",
+      "start_date": "2019-09-30",
+      "end_date": "2025-07-21",
       "description": "Includes the Feb–Mar 2020 COVID crash and extraordinary monetary support, the rapid post-COVID bull, then the inflation and aggressive Fed-hike period that produced a sideways phase roughly from early 2022 to April 2023, followed by recovery."
     }
   ]

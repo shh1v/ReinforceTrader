@@ -1,0 +1,114 @@
+{
+  "1": {
+    "train_loss": 59.703361868159845,
+    "val_results": {
+      "sum_reward": 15.576415188845317,
+      "total_trades": 280,
+      "trade_duration": 2.132142857142857,
+      "hit_rate": 0.5535714285714286,
+      "total_pnl": 18.56306877732277,
+      "profit_factor": 1.4061132881906027,
+      "force_end_trades": 17,
+      "force_end_pnl": 1.75038543343544
+    },
+    "epsilon_start": 1.0,
+    "epsilon_current": 0.8769040763696585,
+    "epsilon_end": 0.7538081527393171
+  },
+  "2": {
+    "train_loss": 18.740949541330338,
+    "val_results": {
+      "sum_reward": 6.5937376928714615,
+      "total_trades": 35,
+      "trade_duration": 4.0285714285714285,
+      "hit_rate": 0.5714285714285714,
+      "total_pnl": 4.235190063714981,
+      "profit_factor": 1.8423598602673712,
+      "force_end_trades": 8,
+      "force_end_pnl": 2.313098907470703
+    },
+    "epsilon_start": 0.8769040763696585,
+    "epsilon_current": 0.7315843288987687,
+    "epsilon_end": 0.586264581427879
+  },
+  "3": {
+    "train_loss": 33.12658902828116,
+    "val_results": {
+      "sum_reward": 39.84173913858769,
+      "total_trades": 365,
+      "trade_duration": 1.3123287671232877,
+      "hit_rate": 0.5671232876712329,
+      "total_pnl": 9.300977200269699,
+      "profit_factor": 1.174233591007373,
+      "force_end_trades": 1,
+      "force_end_pnl": -0.031787872314453125
+    },
+    "epsilon_start": 0.7315843288987687,
+    "epsilon_current": 0.4821020010425473,
+    "epsilon_end": 0.23261967318632595
+  },
+  "4": {
+    "train_loss": 18.095016284263693,
+    "val_results": {
+      "sum_reward": 25.055483374841064,
+      "total_trades": 305,
+      "trade_duration": 1.0262295081967212,
+      "hit_rate": 0.5114754098360655,
+      "total_pnl": -1.3311032056808472,
+      "profit_factor": 0.9710351216940737,
+      "force_end_trades": 3,
+      "force_end_pnl": 0.2084178924560547
+    },
+    "epsilon_start": 0.4821020010425473,
+    "epsilon_current": 0.34879474769082525,
+    "epsilon_end": 0.2154874943391032
+  },
+  "5": {
+    "train_loss": 27.35874950280413,
+    "val_results": {
+      "sum_reward": 35.956046548077985,
+      "total_trades": 1239,
+      "trade_duration": 1.0112994350282485,
+      "hit_rate": 0.5399515738498789,
+      "total_pnl": 34.116394728422165,
+      "profit_factor": 1.1307330581460588,
+      "force_end_trades": 5,
+      "force_end_pnl": 0.47948169708251953
+    },
+    "epsilon_start": 0.34879474769082525,
+    "epsilon_current": 0.21996731867418476,
+    "epsilon_end": 0.09113988965754427
+  },
+  "6": {
+    "train_loss": 18.002864221925847,
+    "val_results": {
+      "sum_reward": 23.659148864901308,
+      "total_trades": 456,
+      "trade_duration": 1.0109649122807018,
+      "hit_rate": 0.5219298245614035,
+      "total_pnl": 11.647586822509766,
+      "profit_factor": 1.1131374819225814,
+      "force_end_trades": 4,
+      "force_end_pnl": 0.3804817199707031
+    },
+    "epsilon_start": 0.21996731867418476,
+    "epsilon_current": 0.1523253278168069,
+    "epsilon_end": 0.08468333695942905
+  },
+  "7": {
+    "train_loss": 11.709582248120569,
+    "val_results": {
+      "sum_reward": 20.99996962102259,
+      "total_trades": 11,
+      "trade_duration": 27.09090909090909,
+      "hit_rate": 0.7272727272727273,
+      "total_pnl": 20.493083953857422,
+      "profit_factor": 3.13262377393185,
+      "force_end_trades": 10,
+      "force_end_pnl": 19.891101837158203
+    },
+    "epsilon_start": 0.1523253278168069,
+    "epsilon_current": 0.11568736533559701,
+    "epsilon_end": 0.07904940285438711
+  }
+}
