@@ -1,3 +1,4 @@
+import math
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -144,13 +145,20 @@ class PortfolioBackTester:
         EWP_max_drawdown = EWP_drawdown.min()
         index_max_drawdown = index_drawdown.min()
         
-        # Compute sharpe ratio and information ratio
+        # Compute sharpe ratio (annualized)
         rf_daily = 0.0
         strat_excess_daily = self._daily_strategy_returns - rf_daily
         sharpe = float('nan')
-        if self._daily_strategy_returns.std(ddof=1) != 0:
-            sharpe = (strat_excess_daily.mean() / self._daily_strategy_returns.std(ddof=1)) * (252 ** 0.5)
+        std_ret = self._daily_strategy_returns.std(ddof=1)
+        if not math.isclose(std_ret, 0.0):
+            sharpe = (strat_excess_daily.mean() / std_ret) * (252 ** 0.5)
 
+        # Compute sortino ratio (annualized)
+        sortino = float('nan')
+        std_down = self._daily_strategy_returns[self._daily_strategy_returns < 0].std(ddof=1)
+        if not math.isclose(std_down, 0.0):
+            sortino = (strat_excess_daily.mean() / std_down) * (252 ** 0.5)
+        
         # Information Ratio (vs. index, annualized): mean(active)/std(active) * sqrt(252)
         active = self._daily_strategy_returns - self._daily_index_returns
         info_ratio = float('nan')
@@ -168,7 +176,10 @@ class PortfolioBackTester:
             "Index Annualized Return": index_ann_return,
             "Index Max Drawdown": index_max_drawdown,
             "Sharpe Ratio (ann, rf=0)": sharpe,
+            "Sortino Ratio (ann, rf=0)": sortino,
             "Information Ratio (vs Index, ann)": info_ratio,
         }
         
-        return pformat({k: int(v) if v.is_integer() else float(v) for k, v in metrics.items()})
+        casted_metrics = {k: int(v) if v.is_integer() else float(v) for k, v in metrics.items()}
+        
+        return pformat(casted_metrics, sort_dicts=False)
