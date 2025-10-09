@@ -188,9 +188,9 @@ class FeatureBuilder:
         # Include excess returns over specifiied horizons
         ex_ret_f = [f'ExRet{h}' for h in self._return_horizons]
         # Include motif feature to identify candlestick patterns
-        motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL', 'Gap', 'GapFill']
+        motif_f = ['Body/HL', 'UWick/HL', 'LWick/HL', 'Gap', 'GapFill']
         # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
-        technical_f = ['EMA5/EMA13', 'EMA13/EMA26', 'EMA26/EMA50', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
+        technical_f = ['EMA5/13', 'EMA13/26', 'EMA26/50', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
         feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + ex_ret_f + motif_f + technical_f],
@@ -237,12 +237,12 @@ class FeatureBuilder:
             ).clip(-1.0, 1.0)
 
             # Upper shadow relative to range
-            self._features_data.loc[:, (ticker, 'UShadow/HL')] = (
+            self._features_data.loc[:, (ticker, 'UWick/HL')] = (
                     (h - np.maximum(o, c)) / candle_height
             ).clip(0.0, 1.0)
 
             # Lower shadow relative to range
-            self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
+            self._features_data.loc[:, (ticker, 'LWick/HL')] = (
                 (np.minimum(o, c) - l) / candle_height
             ).clip(0.0, 1.0)
             
@@ -271,9 +271,9 @@ class FeatureBuilder:
             ema50 = EMAIndicator(close=c, window=50).ema_indicator()
 
             # Compute the EMA ratios
-            self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = self._norm((ema5 / ema13) - 1)
-            self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = self._norm((ema13 / ema26) - 1)
-            self._features_data.loc[:, (ticker, 'EMA26/EMA50')] = self._norm((ema26 / ema50) - 1)
+            self._features_data.loc[:, (ticker, 'EMA5/13')] = self._norm((ema5 / ema13) - 1)
+            self._features_data.loc[:, (ticker, 'EMA13/26')] = self._norm((ema13 / ema26) - 1)
+            self._features_data.loc[:, (ticker, 'EMA26/50')] = self._norm((ema26 / ema50) - 1)
 
 
             # Compute Bollinger Bands (%B and Bandwidth)

@@ -85,7 +85,7 @@ class EpisodeStateLoader:
             case _:
                 raise ValueError(f"Invalid episode type: {episode_type}")
     
-    def _get_set_features(self, episode_type: str) -> dict[tuple[int, str], np.ndarray]:
+    def _get_features_set(self, episode_type: str) -> dict[tuple[int, str], np.ndarray]:
         match episode_type:
             case 'train':
                 return self._train_features
@@ -98,7 +98,7 @@ class EpisodeStateLoader:
     
     def get_state_matrix(self, episode_type: str, episode_id: int, ticker: str, end_index: int, window_size: int):
         # Get the respective feature data for the episode type
-        store = self._get_set_features(episode_type)
+        store = self._get_features_set(episode_type)
         episode_ticker_features = store[(episode_id, ticker)]
 
         # Compute start index of the block
@@ -119,7 +119,7 @@ class EpisodeStateLoader:
     
     def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int) -> np.ndarray:
         # Get the respective feature data for the episode type
-        store = self._get_set_features(episode_type)
+        store = self._get_features_set(episode_type)
         episode_ticker_features = store[(episode_id, ticker)]
 
         # Slice the OHLCV features specific columns
@@ -131,7 +131,7 @@ class EpisodeStateLoader:
         reward_comp_names = self._features_data.columns.get_level_values('Feature')[reward_comp_indices]
         
         # Get the respective feature data for the episode type
-        store = self._get_set_features(episode_type)
+        store = self._get_features_set(episode_type)
         episode_ticker_features = store[(episode_id, ticker)]
 
         # Slice the features relevant to reward computation
