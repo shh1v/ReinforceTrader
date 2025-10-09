@@ -1,75 +1,111 @@
 import numpy as np
 import pandas as pd
-import json
+import warnings
 
 from pathlib import Path
 
 class EpisodeStateLoader:
-    def __init__(self, features_data: pd.DataFrame, feature_indices: dict[str, np.ndarray], episode_config_path: str):
+    def __init__(self, features_data: pd.DataFrame, feature_indices: dict[str, np.ndarray], WFV_config: dict[str, str | int]):
+        # Store the features data and indices
         self._features_data = features_data
         self._feature_indices = feature_indices
-        self._episode_config = self._load_config(episode_config_path)
+        
+        # Load the configuration for Walking Forward Validation (WFV)
+        self._WFV_mode = str(WFV_config["mode"]).lower()
+        if self._WFV_mode not in ['expanding', 'moving']:
+            raise ValueError(f"Invalid WFV mode: {self._WFV_mode}. Must be 'expanding' or 'moving'.")
+        self._train_start = pd.Timestamp(WFV_config["train_start"])
+        self._train_end = pd.Timestamp(WFV_config["train_end"])
+        self._test_start = pd.Timestamp(WFV_config["test_start"])
+        self._test_end = pd.Timestamp(WFV_config["test_end"])
+        self._train_window_size = int(WFV_config["train_window_size"])
+        self._val_window_size = int(WFV_config["val_window_size"])
+        if self._train_window_size <= 0 or self._val_window_size <= 0:
+            raise ValueError("Train and validation window sizes must be positive integers.")
 
         # Store all tickers symbols for getters function
         self._ticker_symbols = self._features_data.columns.get_level_values('Ticker').unique()
 
-        # Store the features in their respoective dicts
-        # keyed by (episode_id, ticker) -> np.ndarray [len(ep), F]
-        self._train_features: dict[tuple[int, str], np.ndarray] = {}
-        self._val_features: dict[tuple[int, str], np.ndarray] = {}
-        self._test_features: dict[tuple[int, str], np.ndarray] = {}
+        # Store the window indices for each episode in their respective dicts
+        # keyed by (episode_id) -> (start_index, end_index)
+        self._train_slices: dict[int, tuple[int, int]] = {}
+        self._val_slices: dict[int, tuple[int, int] | None] = {}
+        self._test_slices: dict[int, tuple[int, int]] = {}
 
-        # Build the episodes states for each ticker
-        self._build_episode_data()
+        # Build the train, val, test episodes slices for the data
+        self._build_episode_slices()
 
-    def _load_config(self, config_path: str) -> dict:
-        try:
-            path = Path(config_path)
-            if not path.exists():
-                raise FileNotFoundError(f'Config file not found: {config_path}')
-            if not path.is_file():
-                raise ValueError(f'Config path is not a file: {config_path}')
+    def _date_to_int_idx(self, date: pd.Timestamp) -> int:
+        idx = self._features_data.index.get_indexer([date])[0]
+        if idx == -1:
+            raise ValueError(f"Date {date} not found in features data index.")
+        return int(idx)
+    
+    def _build_episode_slices(self):
+        # First, build the train and validation indices slices for WFV (all indexes inclusive)
+        # Note: len(train_episodes) != len(val_episodes) if there is not enough data at the end
+ 
+        # Get the integer indices for the train and test periods
+        train_start_idx = self._date_to_int_idx(self._train_start)
+        train_end_idx = self._date_to_int_idx(self._train_end)
+        test_start_idx = self._date_to_int_idx(self._test_start)
+        test_end_idx = self._date_to_int_idx(self._test_end)
+        
+        if train_end_idx >= test_start_idx:
+            raise ValueError("Training period overlaps with test period introducing data leakage.")
+        
+        # Define pointers for the train and validation windows
+        ep = 0
+        w_train_start = train_start_idx
+        w_train_end = w_train_start + self._train_window_size - 1
+        w_val_start, w_val_end = None, None
+        
+        # Build the train and validation indices slices
+        while True:
+            # Case A: Train window starts beyond available training data
+            if w_train_start > train_end_idx:
+                # No more training data can be formed
+                break
+            
+            # Case B: Train window ends beyond available training data
+            if w_train_end > train_end_idx:
+                if ep == 0:
+                    warnings.warn('Not enough data to form a single train + validation episode.')
 
-            with path.open('r', encoding='utf-8') as f:
-                config = json.load(f)
-
-            return config
-
-        except json.JSONDecodeError:
-            raise ValueError(f'Invalid JSON format in {config_path}')
-        except Exception as e:
-            raise RuntimeError(f'Error loading config: {e}')
-
-    def _build_episode_data(self):
-        for ep in self._episode_config["episodes"]:
-            # Check for valid episode types
-            episode_type = ep["type"]
-            if episode_type not in {"train", "test"}:
-                raise ValueError(f"Invalid episode type: {episode_type}")
-
-            episode_id = int(ep["episode_id"])
-            episode_start_date = pd.Timestamp(ep["start_date"])
-            episode_end_date = pd.Timestamp(ep["end_date"])
-
-            # Slice for the episode once; reuse per ticker
-            # We'll select per-ticker below with self._features_data.loc[start:end, ticker]
-            for ticker in self._ticker_symbols:
-                # (len(ep),F) for this ticker and episode window
-                ticker_data = self._features_data.loc[episode_start_date : episode_end_date, ticker]
-
-                # Should never be the case, but just for safety
-                if ticker_data.empty:
-                    continue
-
-                ticker_values = ticker_data.to_numpy(dtype=np.float32)
-
-                if episode_type == "train":
-                    split_idx = int(len(ticker_data) * 0.8)
-                    self._train_features[(episode_id, ticker)] = ticker_values[:split_idx]
-                    self._val_features[(episode_id, ticker)] = ticker_values[split_idx:]
-                else:
-                    # No need for splitting dataset
-                    self._test_features[(episode_id, ticker)] = ticker_values
+                self._train_slices[ep] = (w_train_start, train_end_idx)
+                self._val_slices[ep] = None
+                break
+            
+            # Train window is valid, and validation window can be checked
+            w_val_start = w_train_end + 1
+            w_val_end = w_val_start + self._val_window_size - 1
+            
+            # Case C: Validation window starts beyond available training data
+            if w_val_start > train_end_idx:
+                self._train_slices[ep] = (w_train_start, w_train_end)
+                self._val_slices[ep] = None
+                break
+            
+            # Case D: Validation window ends beyond available training data
+            if w_val_end > train_end_idx:
+                self._train_slices[ep] = (w_train_start, w_train_end)
+                self._val_slices[ep] = (w_val_start, train_end_idx)
+                break
+            
+            # Case E: Both train and validation windows are valid
+            self._train_slices[ep] = (w_train_start, w_train_end)
+            self._val_slices[ep] = (w_val_start, w_val_end)
+            
+            # Move the windows forward based on WFV mode
+            if self._WFV_mode == 'moving':
+                w_train_start += self._val_window_size
+            w_train_end += self._val_window_size
+            
+            # Increment the episode counter
+            ep += 1
+        
+        # Build the test indices slices
+        self._test_slices[0] = (test_start_idx, test_end_idx)
 
     def get_all_tickers(self) -> list:
         return list(self._ticker_symbols)
