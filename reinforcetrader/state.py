@@ -109,48 +109,76 @@ class EpisodeStateLoader:
 
     def get_all_tickers(self) -> list:
         return list(self._ticker_symbols)
-
-    def get_episode_len(self, episode_type: str, episode_id: int, ticker: str) -> int:
+    
+    def get_num_episodes(self, episode_type: str) -> int:
         match episode_type:
             case 'train':
-                return len(self._train_features[(episode_id, ticker)])
+                return len(self._train_slices)
             case 'validate':
-                return len(self._val_features[(episode_id, ticker)])
+                return len([v for v in self._val_slices.values() if v is not None])
             case 'test':
-                return len(self._test_features[(episode_id, ticker)])
+                return len(self._test_slices)
             case _:
                 raise ValueError(f"Invalid episode type: {episode_type}")
+
+    def get_episode_len(self, episode_type: str, episode_id: int) -> int:
+        # Get the start and end indices for the specified episode
+        dates_idx = self._get_episode_window(episode_type, episode_id)
+        
+        return dates_idx[1] - dates_idx[0] + 1
     
-    def _get_features_set(self, episode_type: str) -> dict[tuple[int, str], np.ndarray]:
+    def _get_episode_window(self, episode_type: str, episode_id: int) -> tuple[int, int]:
+        # NOTE: the start and end indices are inclusive
+        # Retrieve the start and end indices for the specified episode
         match episode_type:
             case 'train':
-                return self._train_features
+                dates_idx = self._train_slices.get(episode_id)
             case 'validate':
-                return self._val_features
+                dates_idx =  self._val_slices.get(episode_id)
             case 'test':
-                return self._test_features
+                dates_idx = self._test_slices.get(episode_id)
             case _:
                 raise ValueError(f"Invalid episode type: {episode_type}")
+            
+        # Check if the episode exists
+        if dates_idx is None:
+            raise ValueError(f"Episode id {episode_id} for {episode_type} does not exist.")
+        
+        return dates_idx
+            
     
-    def get_state_matrix(self, episode_type: str, episode_id: int, ticker: str, end_index: int, window_size: int):
-        # Get the respective feature data for the episode type
-        store = self._get_features_set(episode_type)
-        episode_ticker_features = store[(episode_id, ticker)]
-
-        # Compute start index of the block
-        start_index = end_index - window_size + 1
-
-        # Slice features (skip first 5 columns)
-        feats = episode_ticker_features[:, self._feature_indices['State']]
-
-        if start_index >= 0:
-            state_matrix = feats[start_index:end_index + 1, :]
+    def get_state_matrix(self, episode_type: str, episode_id: int, ticker: str, end_index: int, window_size: int, pad_overflow: bool = True) -> np.ndarray:
+        # Check if ticker is valid
+        if ticker not in self._ticker_symbols:
+            raise ValueError(f"Ticker {ticker} not found in features data.")
+        
+        # Get epsiode start and end indices
+        episode_start, episode_end = self._get_episode_window(episode_type, episode_id)
+        
+        # Check if end_index is valid
+        episode_length = episode_end - episode_start + 1
+        if not (0 <= end_index < episode_length):
+            raise ValueError(f"end_index {end_index} out of range for episode length {episode_length}")
+        
+        # Compute start and index of the block (both inclusive)
+        if pad_overflow:
+            block_start_lb = self._date_to_int_idx(self._train_start)
         else:
-            pad_len = -start_index
-            pad_block = np.repeat(feats[[0], :], repeats=pad_len, axis=0)
-            window_block = feats[:end_index + 1, :]
-            state_matrix = np.vstack([pad_block, window_block])
+            block_start_lb = episode_start
+        block_start = episode_start + (end_index - window_size + 1)
+        block_end = episode_start + end_index
 
+        if block_start >= block_start_lb:
+            state_row_idx = list(range(block_start, block_end + 1))
+        else:
+            pad_idx = [block_start_lb] * (block_start_lb - block_start)
+            state_row_idx = pad_idx + list(range(block_start_lb, block_end + 1))
+
+        # Select the state matrix rows and the state features columns
+        ticker_data = self._features_data.xs(ticker, axis=1, level='Ticker')
+        data_window = ticker_data.iloc[pd.Index(state_row_idx)].to_numpy()
+        state_matrix = data_window[:, self._feature_indices['State']]
+        
         return state_matrix
     
     def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int) -> np.ndarray:
