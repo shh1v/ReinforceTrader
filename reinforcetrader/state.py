@@ -152,6 +152,9 @@ class EpisodeStateLoader:
         if ticker not in self._ticker_symbols:
             raise ValueError(f"Ticker {ticker} not found in features data.")
         
+        # Get the ticker specific data
+        ticker_data = self._features_data.xs(ticker, axis=1, level='Ticker')   
+        
         # Get epsiode start and end indices
         episode_start, episode_end = self._get_episode_window(episode_type, episode_id)
         
@@ -165,18 +168,20 @@ class EpisodeStateLoader:
             block_start_lb = self._date_to_int_idx(self._train_start)
         else:
             block_start_lb = episode_start
+            
         block_start = episode_start + (end_index - window_size + 1)
         block_end = episode_start + end_index
 
+        # Select the state matrix rows and the state features columns
         if block_start >= block_start_lb:
             state_row_idx = list(range(block_start, block_end + 1))
+            data_window = ticker_data.iloc[block_start : block_end + 1].to_numpy(copy=False)
+            
         else:
             pad_idx = [block_start_lb] * (block_start_lb - block_start)
-            state_row_idx = pad_idx + list(range(block_start_lb, block_end + 1))
-
-        # Select the state matrix rows and the state features columns
-        ticker_data = self._features_data.xs(ticker, axis=1, level='Ticker')
-        data_window = ticker_data.iloc[pd.Index(state_row_idx)].to_numpy()
+            state_row_idx = pad_idx + list(range(block_start_lb, block_end + 1))        
+            data_window = ticker_data.iloc[pd.Index(state_row_idx)].to_numpy(copy=False)
+            
         state_matrix = data_window[:, self._feature_indices['State']]
         
         return state_matrix
