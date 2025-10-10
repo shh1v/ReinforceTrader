@@ -222,23 +222,10 @@ class EpisodeStateLoader:
         
         return {param: value for param, value in zip(reward_params, param_values)}
     
-    def get_test_dates(self, episode_id: int, ticker: str) -> pd.DatetimeIndex:
-        # find the test episode config
-        ep_cfg = next(
-            ep for ep in self._episode_config["episodes"]
-            if int(ep["episode_id"]) == int(episode_id) and ep["type"] == "test"
-        )
-        start = pd.Timestamp(ep_cfg["start_date"])
-        end   = pd.Timestamp(ep_cfg["end_date"])
-
-        # full date slice in the features DataFrame
-        full_idx = self._features_data.loc[start:end].index
-
-        # trim to stored length (in case of dropna/padding during feature build)
-        L = self._test_features[(episode_id, ticker)].shape[0]
+    def get_test_dates(self, episode_id: int) -> pd.DatetimeIndex:
+        # This is a utility function to get aligned date index for test episodes
+        # Used for aligning the signals and prices dataframes during backtesting
+        start_date, end_date = self._get_episode_window('test', episode_id)
+        indices =  self._features_data.loc[start_date : end_date].index
         
-        if len(full_idx) < L:
-            # fall back to last L rows from available
-            return pd.DatetimeIndex(pd.to_datetime(full_idx[-L:]))
-        
-        return pd.DatetimeIndex(pd.to_datetime(full_idx[:L]))
+        return pd.DatetimeIndex(pd.to_datetime(indices))
