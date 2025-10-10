@@ -188,25 +188,39 @@ class EpisodeStateLoader:
     
     def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int) -> np.ndarray:
         # Get the respective feature data for the episode type
-        store = self._get_features_set(episode_type)
-        episode_ticker_features = store[(episode_id, ticker)]
+        episode_start, episode_end = self._get_episode_window(episode_type, episode_id)
+        
+        # Check if end_index is valid
+        episode_length = episode_end - episode_start + 1
+        if not (0 <= index < episode_length):
+            raise ValueError(f"end_index {index} out of range for episode length {episode_length}")
 
+        # Get the ticker specific row for the given index in the episode
+        abs_index = episode_start + index
+        ticker_row = self._features_data.xs(ticker, axis=1, level='Ticker').iloc[abs_index].to_numpy(copy=False)
+        
         # Slice the OHLCV features specific columns
-        return episode_ticker_features[index, self._feature_indices['OHLCV']]
+        return ticker_row[:, self._feature_indices['OHLCV']]
     
     def get_reward_computes(self, episode_type: str, episode_id: int, ticker: str, index: int) -> dict[str, float]:
         # Get the reward parameters indices and parameter names
-        reward_comp_indices = self._feature_indices['Rewards']
-        reward_comp_names = self._features_data.columns.get_level_values('Feature')[reward_comp_indices]
+        reward_params_idx = self._feature_indices['Rewards']
+        reward_params = self._features_data.columns.get_level_values('Feature')[reward_params_idx]
         
         # Get the respective feature data for the episode type
-        store = self._get_features_set(episode_type)
-        episode_ticker_features = store[(episode_id, ticker)]
-
-        # Slice the features relevant to reward computation
-        reward_comp_values = episode_ticker_features[index, reward_comp_indices]
+        episode_start, episode_end = self._get_episode_window(episode_type, episode_id)
         
-        return {rn: rv for rn, rv in zip(reward_comp_names, reward_comp_values)}
+        # Check if end_index is valid
+        episode_length = episode_end - episode_start + 1
+        if not (0 <= index < episode_length):
+            raise ValueError(f"end_index {index} out of range for episode length {episode_length}")
+
+        # Get the ticker specific row for the given index in the episode
+        abs_index = episode_start + index
+        ticker_row = self._features_data.xs(ticker, axis=1, level='Ticker').iloc[abs_index].to_numpy(copy=False)
+        param_values =  ticker_row[:, self._feature_indices['Rewards']].tolist()
+        
+        return {param: value for param, value in zip(reward_params, param_values)}
     
     def get_test_dates(self, episode_id: int, ticker: str) -> pd.DatetimeIndex:
         # find the test episode config
