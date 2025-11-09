@@ -1,8 +1,8 @@
+import warnings
 import numpy as np
 import pandas as pd
-import warnings
-
-from pathlib import Path
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 class EpisodeStateLoader:
     def __init__(self, features_data: pd.DataFrame, feature_indices: dict[str, np.ndarray], WFV_config: dict[str, str | int]):
@@ -186,7 +186,7 @@ class EpisodeStateLoader:
         
         return state_matrix
     
-    def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int) -> np.ndarray:
+    def get_state_OHLCV(self, episode_type: str, episode_id: int, ticker: str, index: int) -> dict[str, float]:
         # Get the respective feature data for the episode type
         episode_start, episode_end = self._get_episode_window(episode_type, episode_id)
         
@@ -199,8 +199,12 @@ class EpisodeStateLoader:
         abs_index = episode_start + index
         ticker_row = self._features_data.xs(ticker, axis=1, level='Ticker').iloc[abs_index].to_numpy(copy=False)
         
-        # Slice the OHLCV features specific columns
-        return ticker_row[:, self._feature_indices['OHLCV']]
+        # Slice the OHLCV features specific columns and create dict
+        OHLCV_params_idx = self._feature_indices['OHLCV']
+        OHLCV_params = self._features_data.columns.get_level_values('Feature')[OHLCV_params_idx]
+        OHLCV_values = ticker_row[OHLCV_params_idx].tolist()
+        
+        return {param: value for param, value in zip(OHLCV_params, OHLCV_values)}
     
     def get_reward_computes(self, episode_type: str, episode_id: int, ticker: str, index: int) -> dict[str, float]:
         # Get the reward parameters indices and parameter names
@@ -218,7 +222,7 @@ class EpisodeStateLoader:
         # Get the ticker specific row for the given index in the episode
         abs_index = episode_start + index
         ticker_row = self._features_data.xs(ticker, axis=1, level='Ticker').iloc[abs_index].to_numpy(copy=False)
-        param_values =  ticker_row[:, self._feature_indices['Rewards']].tolist()
+        param_values =  ticker_row[self._feature_indices['Rewards']].tolist()
         
         return {param: value for param, value in zip(reward_params, param_values)}
     
@@ -229,3 +233,34 @@ class EpisodeStateLoader:
         indices =  self._features_data.loc[start_date : end_date].index
         
         return pd.DatetimeIndex(pd.to_datetime(indices))
+
+    def get_WFV_plot(self):
+        dates = pd.DatetimeIndex(self._features_data.index)
+        idx_to_date = lambda slice: (dates[slice[0]], dates[slice[1]])
+
+        fig, ax = plt.subplots(figsize=(10, 0.6 * (len(self._train_slices) + 2)))
+        colors = {"train": "tab:blue", "val": "tab:orange", "test": "tab:green"}
+
+        # plot train/val episodes
+        for ep in sorted(self._train_slices.keys()):
+            t0, t1 = idx_to_date(self._train_slices[ep])
+            ax.barh(y=ep, left=t0, width=(t1 - t0).days, color=colors["train"])
+            v = self._val_slices.get(ep)
+            if v is not None:
+                v0, v1 = idx_to_date(v)
+                ax.barh(y=ep, left=v0, width=(v1 - v0).days, color=colors["val"])
+
+        # plot test as last episode row
+        test_ep = len(self._train_slices)
+        t0, t1 = idx_to_date(self._test_slices[0])
+        ax.barh(y=test_ep, left=t0, width=(t1 - t0).days, color=colors["test"])
+
+        ax.set_yticks(range(test_ep + 1))
+        ax.set_yticklabels([str(i) for i in range(test_ep)] + ["test"])
+        ax.invert_yaxis()
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Episode ID (0 top → down)")
+        ax.set_title("Walk-Forward Validation Layout")
+        
+        plt.show()

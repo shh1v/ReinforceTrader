@@ -25,6 +25,8 @@ class DualBranchDQN(keras.Model):
 
         # Motif Branch for finding candle patterns using Conv1D
         motif_input = Input(shape=motif_state_shape, name="motif_input")
+        # Here, 32 is the number of filters, 3 is the kernel size
+        # So, the output of each CNN layer would be (window_size, 32)
         motif_conv_layer = layers.Conv1D(32, 3, padding="same", activation="relu")(motif_input)
         motif_conv_layer = layers.Conv1D(32, 3, padding="same", activation="relu")(motif_conv_layer)
         motif_out = layers.GlobalAveragePooling1D(name="motif_output")(motif_conv_layer)
@@ -234,8 +236,6 @@ class RLAgent:
             # Set the action and reward
             actions[i] = action
             rewards[i] = reward
-
-        # Build a mask to 
         
         q_current = self._model.predict({"motif_input": motif_batch, "context_input": context_batch}, verbose=0)
         q_next_online = self._model.predict({"motif_input": next_motif_batch, "context_input": next_context_batch}, verbose=0)
@@ -353,13 +353,8 @@ class RLAgent:
             epsilon_start = self._epsilon
             
             # Iterate tickers, training sequentially
+            L = state_loader.get_episode_len('train', e)
             for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
-                L = state_loader.get_episode_len('train', e, ticker)
-                if L < self._window_size + 1:
-                    # skip tickers that don't have enough data for a window and next step
-                    # Not the case for the current episode configuration file
-                    print(f'Warning: skipping Ep: {e} of Ticker: {ticker} due to insufficient data')
-                    continue
 
                 # Train on this ticker for the episode (standard rollout with replay)
                 t0 = self._window_size - 1
@@ -457,12 +452,10 @@ class RLAgent:
         # Tells us the distorition in performance metrics
         force_end_trades = 0
         force_end_pnl = 0.0
-
+        
+        L = state_loader.get_episode_len('validate', episode_id)
+        
         for ticker in tickers:
-            L = state_loader.get_episode_len('validate', episode_id, ticker)
-            if L < self._window_size + 1:
-                continue
-
             t0 = self._window_size - 1
             state = state_loader.get_state_matrix('validate', episode_id, ticker, t0, self._window_size)
             prev_pos = 0
@@ -470,7 +463,7 @@ class RLAgent:
 
             for t in range(t0, L - 1):
                 action = self.act(state, prev_pos, test_agent=True)
-                curr_price = float(state_loader.get_state_OHLCV('validate', episode_id, ticker, t)[3])
+                curr_price = state_loader.get_state_OHLCV('validate', episode_id, ticker, t)['Close']
                 
                 ex_ret_t = state_loader.get_reward_computes('validate', episode_id, ticker, t)
                 reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
@@ -607,15 +600,13 @@ class RLAgent:
         col_keys = [] # ["AAPL", "MSFT", ...] in deterministic order
         sig_series_list = [] # [Series-of-dicts, ...]
         px_series_list  = [] # [Series-of-floats, ...]
-
+        
+        L = state_loader.get_episode_len('test', episode_id)
+        
+        # Get the index for the signals and prices dataframes
+        df_idx = state_loader.get_test_dates(episode_id)
+        
         for ticker in tqdm(tickers_all, desc=f'Testing episode {episode_id}', ncols=100):
-            L = state_loader.get_episode_len('test', episode_id, ticker)
-            if L < self._window_size + 1:
-                continue
-
-            # Aligned date index for this (episode, ticker)
-            idx = state_loader.get_test_dates(episode_id, ticker)
-
             # Prepare iteration
             t0 = self._window_size - 1
             state = state_loader.get_state_matrix('test', episode_id, ticker, t0, self._window_size)
@@ -632,7 +623,7 @@ class RLAgent:
 
             # main test loop
             for t in range(t0, L - 1):
-                curr_close = float(state_loader.get_state_OHLCV('test', episode_id, ticker, t)[3])
+                curr_close = state_loader.get_state_OHLCV('test', episode_id, ticker, t)['Close']
                 close_px[t] = curr_close
 
                 action = self.act(state, prev_pos, test_agent=True)
@@ -655,7 +646,7 @@ class RLAgent:
                 prev_pos = pos_t
 
             # final row (t = L-1): record price; no new decision possible so force hold-out or sell
-            close_px[L - 1] = float(state_loader.get_state_OHLCV('test', episode_id, ticker, L - 1)[3])
+            close_px[L - 1] = state_loader.get_state_OHLCV('test', episode_id, ticker, L - 1)['Close']
             if sig_cells[L - 1] is None:
                 if prev_pos == 0:
                     # out of trade -> hold-out
@@ -666,8 +657,8 @@ class RLAgent:
 
             # Stash in ordered lists
             col_keys.append(ticker)
-            sig_series_list.append(pd.Series(sig_cells, index=idx))
-            px_series_list.append(pd.Series(close_px, index=idx))
+            sig_series_list.append(pd.Series(sig_cells, index=df_idx))
+            px_series_list.append(pd.Series(close_px, index=df_idx))
 
         # Concatenate into DataFrames with single-level "Ticker" columns
         if len(sig_series_list) == 0:
