@@ -23,29 +23,37 @@ class DualBranchDQN(keras.Model):
     def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int, learning_rate: float) -> None:
         super().__init__()
 
-        # Motif Branch for finding OHLCV patterns using Conv1D
+        # Motif Branch for finding 1-day price movement patterns using Conv1D
         motif_input = Input(shape=motif_state_shape, name="motif_input")
         motif_layer = layers.Conv1D(filters=16, kernel_size=1, padding="same", activation="relu")(motif_input)
+        motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
+        
         motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding="same", activation="relu")(motif_layer)
+        motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
+        
         motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding="same", activation="relu")(motif_layer)
-        motif_max = layers.MaxPooling1D(pool_size=3)(motif_layer)
-        motif_avg = layers.GlobalAveragePooling1D(motif_layer)
-        motif_out = layers.GlobalAveragePooling1D(name="motif_output")([motif_max, motif_avg])
+        motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
+        
+        motif_max = layers.GlobalMaxPooling1D()(motif_layer)
+        motif_avg = layers.GlobalAveragePooling1D()(motif_layer)
+        
+        motif_out = layers.Concatenate(name="motif_output")([motif_max, motif_avg])
 
         # Context Branch consisting of technical indicators
         context_input = Input(shape=(context_state_size,), name="context_input")
         context_layer = layers.Dense(units=256, activation="relu")(context_input)
+        context_layer = layers.Dropout(0.1)(context_layer)
         context_layer = layers.Dense(units=128, activation="relu")(context_layer)
+        context_layer = layers.Dropout(0.1)(context_layer)
         context_out = layers.Dense(units=64, activation="relu", name="context_output")(context_layer)
         
         # Late fusion of both the motif and context branches
         fused_branch = layers.Concatenate(name="late_fusion")([motif_out, context_out])
         fused_branch = layers.Dense(64, activation="relu")(fused_branch)
-        fused_branch = layers.LayerNormalization()(fused_branch)
+        fused_branch = layers.Dropout(0.1)(fused_branch)
         fused_branch = layers.Dense(32, activation="relu")(fused_branch)
-        fused_branch = layers.LayerNormalization()(fused_branch)
+        fused_branch = layers.Dropout(0.1)(fused_branch)
         fused_branch = layers.Dense(16, activation="relu")(fused_branch)
-        fused_branch = layers.LayerNormalization()(fused_branch)
         Q = layers.Dense(action_size, name="q_values")(fused_branch)
 
         model_input = {"motif_input": motif_input, "context_input": context_input}
@@ -170,13 +178,13 @@ class DRLAgent:
 
         return q_values
     
-    def act(self, state_matrix: np.ndarray, prev_pos: int, test_agent: bool=False) -> int:
+    def act(self, state_matrix: np.ndarray, prev_pos: int, training: bool=True) -> int:
         if prev_pos not in {0, 1}:
             raise ValueError(f'Invalid trade position: {prev_pos}')
         
         # Defines an epsilon-greedy behaviour policy
         # Pick random action epsilon times
-        if not test_agent and np.random.random() < self._epsilon:
+        if training and np.random.random() < self._epsilon:
             if prev_pos == 0:
                 # A_{Out of trade}: {0: buy, 1: hold-out}
                 return np.random.randint(0, 2)
@@ -191,6 +199,8 @@ class DRLAgent:
         else:
             mask = np.array([-np.inf, -np.inf, 0, 0])
             
+        # Dont use dropout as act() function is not used
+        # for gradient descent updates
         q_values = self.get_q_values(state_matrix, prev_pos)
         restricted_q_values = mask + q_values
         
@@ -229,7 +239,7 @@ class DRLAgent:
             next_ctx = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
             next_motif_batch[i] = next_motif
             next_context_batch[i] = np.concatenate([next_ctx, np.array([pos_t], dtype=np.float32)], axis=0)
-
+            
             # Add the appropriate mask based on pos_t
             if pos_t == 0:
                 # Only allow buy, hold-out when not in trade
@@ -242,9 +252,14 @@ class DRLAgent:
             actions[i] = action
             rewards[i] = reward
         
-        q_current = self._model.predict({"motif_input": motif_batch, "context_input": context_batch}, verbose=0)
-        q_next_online = self._model.predict({"motif_input": next_motif_batch, "context_input": next_context_batch}, verbose=0)
-        q_next_target = self._target_model.predict({"motif_input": next_motif_batch, "context_input": next_context_batch}, verbose=0)
+        # Prepare current and next state inputs
+        curr_state = {"motif_input": motif_batch, "context_input": context_batch}
+        next_state = {"motif_input": next_motif_batch, "context_input": next_context_batch}
+        
+        # Predict Q values for current and next states
+        q_current = self._model.predict(curr_state, verbose=0)
+        q_next_online = self._model.predict(next_state, verbose=0)
+        q_next_target = self._target_model.predict(next_state, verbose=0)
 
         # Apply the mask on the q_next table to restrict action choosing
         q_next_online += mask_next
@@ -304,26 +319,26 @@ class DRLAgent:
             # A_{Out of trade}: {0: buy, 1: hold-out}
             if action == 0:
                 # buy signal was given when out of trade
-                g = gamma * RLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
+                g = gamma * DRLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
                 reward = g - cost # type: ignore
                 pos_t = 1
             else:
                 # hold-out signal was given when out of trade
-                avoid_loss = -RLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False)
-                miss_gain = RLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True)
+                avoid_loss = -DRLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False)
+                miss_gain = DRLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True)
                 reward = alpha * max(0.0, avoid_loss) - beta * max(0.0, miss_gain) # type: ignore
                 pos_t = 0
         elif prev_pos == 1:
             # A_{In trade}: {2: sell, 3: hold-in}
             if action == 2:
                 # sell signal was given when in trade
-                g = -lam * RLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False) # type: ignore
+                g = -lam * DRLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False) # type: ignore
                 reward = max(0.0, g) - cost # type: ignore
                 pos_t = 0
             else:
                 # hold-in signal was given when in trade
-                g_pos = upsilon * RLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
-                g_neg = mu * RLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False) # type: ignore
+                g_pos = upsilon * DRLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
+                g_neg = mu * DRLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False) # type: ignore
                 reward = max(0.0, g_pos + g_neg)
                 pos_t = 1
         else:
@@ -467,7 +482,7 @@ class DRLAgent:
             entry_price = None
 
             for t in range(t0, L - 1):
-                action = self.act(state, prev_pos, test_agent=True)
+                action = self.act(state, prev_pos, training=False)
                 curr_price = state_loader.get_state_OHLCV('validate', episode_id, ticker, t)['Close']
                 
                 ex_ret_t = state_loader.get_reward_computes('validate', episode_id, ticker, t)
@@ -631,10 +646,10 @@ class DRLAgent:
                 curr_close = state_loader.get_state_OHLCV('test', episode_id, ticker, t)['Close']
                 close_px[t] = curr_close
 
-                action = self.act(state, prev_pos, test_agent=True)
+                action = self.act(state, prev_pos, training=False)
                 sig_cells[t] = self._action_to_onehot(action) # type: ignore
 
-                # Compute weather 
+                # Compute whether in trade or out of trade for next step
                 if prev_pos == 0 and action == 0:
                     # buy signal was given when out of trade
                     pos_t = 1
