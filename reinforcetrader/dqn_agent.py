@@ -23,23 +23,28 @@ class DualBranchDQN(keras.Model):
     def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int, learning_rate: float) -> None:
         super().__init__()
 
-        # Motif Branch for finding candle patterns using Conv1D
+        # Motif Branch for finding OHLCV patterns using Conv1D
         motif_input = Input(shape=motif_state_shape, name="motif_input")
-        # Here, 32 is the number of filters, 3 is the kernel size
-        # So, the output of each CNN layer would be (window_size, 32)
-        motif_conv_layer = layers.Conv1D(32, 3, padding="same", activation="relu")(motif_input)
-        motif_conv_layer = layers.Conv1D(32, 3, padding="same", activation="relu")(motif_conv_layer)
-        motif_out = layers.GlobalAveragePooling1D(name="motif_output")(motif_conv_layer)
+        motif_layer = layers.Conv1D(filters=16, kernel_size=1, padding="same", activation="relu")(motif_input)
+        motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding="same", activation="relu")(motif_layer)
+        motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding="same", activation="relu")(motif_layer)
+        motif_max = layers.MaxPooling1D(pool_size=3)(motif_layer)
+        motif_avg = layers.GlobalAveragePooling1D(motif_layer)
+        motif_out = layers.GlobalAveragePooling1D(name="motif_output")([motif_max, motif_avg])
 
-        # Context Branch for finding regimes
+        # Context Branch consisting of technical indicators
         context_input = Input(shape=(context_state_size,), name="context_input")
-        context_hid_layer = layers.Dense(64, activation="relu")(context_input)
-        context_out = layers.Dense(32, activation="relu", name="context_output")(context_hid_layer)
+        context_layer = layers.Dense(units=256, activation="relu")(context_input)
+        context_layer = layers.Dense(units=128, activation="relu")(context_layer)
+        context_out = layers.Dense(units=64, activation="relu", name="context_output")(context_layer)
         
         # Late fusion of both the motif and context branches
         fused_branch = layers.Concatenate(name="late_fusion")([motif_out, context_out])
-        fused_branch = layers.Dense(128, activation="relu")(fused_branch)
         fused_branch = layers.Dense(64, activation="relu")(fused_branch)
+        fused_branch = layers.LayerNormalization()(fused_branch)
+        fused_branch = layers.Dense(32, activation="relu")(fused_branch)
+        fused_branch = layers.LayerNormalization()(fused_branch)
+        fused_branch = layers.Dense(16, activation="relu")(fused_branch)
         fused_branch = layers.LayerNormalization()(fused_branch)
         Q = layers.Dense(action_size, name="q_values")(fused_branch)
 
@@ -50,7 +55,7 @@ class DualBranchDQN(keras.Model):
     def get_model(self):
         return self._model
 
-class RLAgent:
+class DRLAgent:
     def __init__(self, agent_config, reward_params: dict[str, object], model_path: str | None=None) -> None:
         # Store the reward parameters which are used to compute the reward
         self._reward_params = reward_params

@@ -256,11 +256,11 @@ class EpisodeStateLoader:
         ax.barh(y=test_ep, left=t0, width=(t1 - t0).days, color=colors["test"])
 
         ax.set_yticks(range(test_ep + 1))
-        ax.set_yticklabels([str(i) for i in range(test_ep)] + ["test"])
+        ax.set_yticklabels([str(i) for i in range(test_ep)] + ["Test"])
         ax.invert_yaxis()
         ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(mdates.AutoDateLocator()))
         ax.set_xlabel("Date")
-        ax.set_ylabel("Episode ID (0 top → down)")
+        ax.set_ylabel("Episode ID")
         ax.set_title("Walk-Forward Validation Layout")
         
         plt.show()
