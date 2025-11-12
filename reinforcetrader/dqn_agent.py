@@ -26,42 +26,47 @@ class DualBranchDQN(keras.Model):
         super().__init__()
 
         # Motif Branch for finding 1-day price movement patterns using Conv1D
-        motif_input = Input(shape=motif_state_shape, name="motif_input")
-        motif_layer = layers.Conv1D(filters=16, kernel_size=1, padding="same", activation="relu")(motif_input)
+        motif_input = Input(shape=motif_state_shape, name='motif_input')
+        motif_layer = layers.Conv1D(filters=16, kernel_size=1, padding='same', activation='relu')(motif_input)
         motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
         
-        motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding="same", activation="relu")(motif_layer)
+        motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(motif_layer)
         motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
         
-        motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding="same", activation="relu")(motif_layer)
+        motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(motif_layer)
         motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
         
         motif_max = layers.GlobalMaxPooling1D()(motif_layer)
         motif_avg = layers.GlobalAveragePooling1D()(motif_layer)
         
-        motif_out = layers.Concatenate(name="motif_output")([motif_max, motif_avg])
+        motif_out = layers.Concatenate(name='motif_output')([motif_max, motif_avg])
 
         # Context Branch consisting of technical indicators
-        context_input = Input(shape=(context_state_size,), name="context_input")
-        context_layer = layers.Dense(units=256, activation="relu")(context_input)
+        context_input = Input(shape=(context_state_size,), name='context_input')
+        context_layer = layers.Dense(units=256, activation='relu')(context_input)
         context_layer = layers.Dropout(0.1)(context_layer)
-        context_layer = layers.Dense(units=128, activation="relu")(context_layer)
+        context_layer = layers.Dense(units=128, activation='relu')(context_layer)
         context_layer = layers.Dropout(0.1)(context_layer)
-        context_out = layers.Dense(units=64, activation="relu", name="context_output")(context_layer)
+        context_out = layers.Dense(units=64, activation='relu', name='context_output')(context_layer)
         
         # Late fusion of both the motif and context branches
-        fused_branch = layers.Concatenate(name="late_fusion")([motif_out, context_out])
-        fused_branch = layers.Dense(64, activation="relu")(fused_branch)
+        fused_branch = layers.Concatenate(name='late_fusion')([motif_out, context_out])
+        fused_branch = layers.Dense(64, activation='relu')(fused_branch)
         fused_branch = layers.Dropout(0.1)(fused_branch)
-        fused_branch = layers.Dense(32, activation="relu")(fused_branch)
-        fused_branch = layers.Dropout(0.1)(fused_branch)
-        fused_branch = layers.Dense(16, activation="relu")(fused_branch)
+        fused_branch = layers.Dense(32, activation='relu')(fused_branch)
         
-        Q = layers.Dense(action_size, name="q_values")(fused_branch)
-
-        model_input = {"motif_input": motif_input, "context_input": context_input}
-        self._model = keras.Model(inputs=model_input, outputs=Q, name="DualBranchDQN")
-        self._model.compile(loss="mse", optimizer=optimizers.Adam(learning_rate, clipnorm=1.0))
+        # State and Advantage value stream layers for Dueling DQN
+        V = layers.Dense(units=16, activation='relu')(fused_branch)
+        V = layers.Dense(1, name='state_value')(V)
+        A = layers.Dense(units=16, activation='relu')(fused_branch)
+        A = layers.Dense(action_size, name='advantage_value')(A)
+        
+        # Combine to compute the Q values
+        Q = V + (A - tf.reduce_mean(A, axis=1, keepdims=True))
+        
+        model_input = {'motif_input': motif_input, 'context_input': context_input}
+        self._model = keras.Model(inputs=model_input, outputs=Q, name='DualBranchDQN')
+        self._model.compile(loss='mse', optimizer=optimizers.Adam(learning_rate, clipnorm=1.0))
 
     def get_model(self):
         return self._model
@@ -92,7 +97,7 @@ class DRLAgent:
         
         # Check if the model path exists
         if not (model_path is None or os.path.exists(model_path)):
-            raise FileNotFoundError(f"Model file at {model_path} does not exist")
+            raise FileNotFoundError(f'Model file at {model_path} does not exist')
         
         # Store the model name for pre loading a model
         self._model_path = model_path
@@ -105,7 +110,7 @@ class DRLAgent:
         self._epsilon_boost_factor = agent_config.get('epsilon_boost_factor', 0.0)
         
         if not 0.0 <= self._epsilon_boost_factor <= 1.0:
-            raise ValueError("epsilon boost factor must be in [0.0, 1.0]")
+            raise ValueError('epsilon boost factor must be in [0.0, 1.0]')
         
         n_updates = agent_config.get('decay_updates', 25000) # No. of updates to minimum epsilon
         self._epsilon_decay = (self._epsilon_min / self._epsilon) ** (1.0 / n_updates)
@@ -114,7 +119,7 @@ class DRLAgent:
 
         # Load model or define new
         if self._model_path is not None:
-            print(f"Loading model from {self._model_path}")
+            print(f'Loading model from {self._model_path}')
             self._model = keras.models.load_model(model_path)
         else:
             self._model = self._init_model(learning_rate)
@@ -173,7 +178,7 @@ class DRLAgent:
 
         return {'motif_input': motif_input, 'context_input': context_input}
     
-    def get_q_values(self, state_matrix: np.ndarray, prev_pos: int) -> np.ndarray:
+    def get_q_values(self, state_matrix: np.ndarray, prev_pos: int) -> tf.Tensor:
         # Note: prev_pos is 0 if out of trade or 1 is in trade.
         if prev_pos not in {0, 1}:
             raise ValueError(f'Invalid trade position: {prev_pos}')
@@ -203,11 +208,11 @@ class DRLAgent:
         # Compute Q values from DQN and restrict action space
         q_values = self.get_q_values(state_matrix, prev_pos) + self._get_mask(prev_pos)
         
-        return int(tf.argmax(q_values[0]).numpy())
+        return int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
 
     def exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
-            raise ValueError("Not enough samples in memory to perform experience replay")
+            raise ValueError('Not enough samples in memory to perform experience replay')
 
         # Prefer uniform sampling to break time correlations
         idx = np.random.choice(len(self._memory), size=batch_size, replace=False)
@@ -251,8 +256,8 @@ class DRLAgent:
         rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
         
         # Prepare current and next state inputs
-        curr_state = {"motif_input": motif_batch, "context_input": context_batch}
-        next_state = {"motif_input": next_motif_batch, "context_input": next_context_batch}
+        curr_state = {'motif_input': motif_batch, 'context_input': context_batch}
+        next_state = {'motif_input': next_motif_batch, 'context_input': next_context_batch}
         
         # Predict Q values for current and next states and restrict action space
         q_current = self._model(curr_state, training=False)
@@ -281,7 +286,7 @@ class DRLAgent:
     @staticmethod
     def _softmax_weighted_sum(ex_ret, S, tau, positive=True) -> np.float32:
         if tau <= 0:
-            raise ValueError("tau must be > 0")
+            raise ValueError('tau must be > 0')
         
         X = np.array([ex_ret[f'ExRet{s}'] for s in S], dtype=np.float32)
         sign = 1.0 if positive else -1.0
@@ -403,7 +408,7 @@ class DRLAgent:
                                 
                             # Decay epsilon slowly until min
                             if self._epsilon > self._epsilon_min:
-                                self._epsilon *= self._epsilon_decay 
+                                self._epsilon *= self._epsilon_decay
                     
                     # Advance to the next state
                     state = next_state
@@ -413,7 +418,7 @@ class DRLAgent:
             val_result = self._run_validation(state_loader, e, tickers_all)
             
             # Print the validation summary
-            print(f"Episode {e} validation summary:")
+            print(f'Episode {e} validation summary:')
             print(f"Train loss: {train_loss:.4f}, Val loss: {-val_result['sum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
             print(f"Trade Duration: {val_result['trade_duration']:.2f}, Total PnL: {val_result['total_pnl']:.2f}, Profit Factor: {val_result['profit_factor']:.3f}")
             print(f"Force End Trade Count: {val_result['force_end_trades']}, Force End PnL: {val_result['force_end_pnl']:.2f}")
@@ -424,31 +429,31 @@ class DRLAgent:
             
             # Store logs for this episode
             logs_by_episode[e] = {
-                "train_loss": train_loss,
-                "val_results": val_result,
-                "epsilon_start": epsilon_start,
-                "epsilon_current": self._epsilon,
-                "epsilon_end": epsilon_end
+                'train_loss': train_loss,
+                'val_results': val_result,
+                'epsilon_start': epsilon_start,
+                'epsilon_current': self._epsilon,
+                'epsilon_end': epsilon_end
             }
             
         # Plot all the training and validation losses
-        train_losses = [logs_by_episode[ep]["train_loss"] for ep in episode_ids]
-        val_losses = [-logs_by_episode[ep]["val_results"]["sum_reward"] for ep in episode_ids]
+        train_losses = [logs_by_episode[ep]['train_loss'] for ep in episode_ids]
+        val_losses = [-logs_by_episode[ep]['val_results']['sum_reward'] for ep in episode_ids]
         self._plot_losses(train_losses, val_losses, fname=os.path.join(train_config['plots_dir'], 'train_losses.png'))
         
         # Also plot the epsilon decay
-        eps_start = [logs_by_episode[ep]["epsilon_start"] for ep in episode_ids] 
-        eps_curr = [logs_by_episode[ep]["epsilon_current"] for ep in episode_ids] 
-        eps_end = [logs_by_episode[ep]["epsilon_end"] for ep in episode_ids] 
+        eps_start = [logs_by_episode[ep]['epsilon_start'] for ep in episode_ids] 
+        eps_curr = [logs_by_episode[ep]['epsilon_current'] for ep in episode_ids] 
+        eps_end = [logs_by_episode[ep]['epsilon_end'] for ep in episode_ids] 
         eps_fname = os.path.join(train_config['plots_dir'], 'epsilon_decay.png')
         self._plot_epsilon_decay(eps_start, eps_curr, eps_end, fname=eps_fname)
         
         # Save model checkpoint with the current date and time
-        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._model.save(os.path.join(train_config['model_dir'], f"model_{date_str}.keras"))
+        date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self._model.save(os.path.join(train_config['model_dir'], f'model_{date_str}.keras'))
         
         # Save logs to a json file
-        with open(os.path.join(train_config['logs_dir'], f"train_logs_{date_str}.json"), 'w') as f:
+        with open(os.path.join(train_config['logs_dir'], f'train_logs_{date_str}.json'), 'w') as f:
             json.dump(logs_by_episode, f, indent=2)
 
         return logs_by_episode
@@ -498,7 +503,7 @@ class DRLAgent:
                     total_trades += 1
                 elif prev_pos == 1 and (pos_t == 0 or t == L - 2):
                     if entry_price is None:
-                        raise ValueError("Entry price should not be None when exiting a trade")
+                        raise ValueError('Entry price should not be None when exiting a trade')
                     
                     # Compute trade pnl
                     trade_pnl = curr_price - entry_price
@@ -604,10 +609,10 @@ class DRLAgent:
     def _action_to_onehot(self, a: int) -> dict:
         # 0: buy, 1: hold-out, 2: sell, 3: hold-in
         return {
-            "buy":  1 if a == 0 else 0,
-            "hold-out":  1 if a == 1 else 0,
-            "sell": 1 if a == 2 else 0,
-            "hold-in": 1 if a == 3 else 0,
+            'buy':  1 if a == 0 else 0,
+            'hold-out':  1 if a == 1 else 0,
+            'sell': 1 if a == 2 else 0,
+            'hold-in': 1 if a == 3 else 0,
         }
 
     def test(self, state_loader: EpisodeStateLoader, episode_id: int, test_config: dict[str, Any]):
@@ -615,7 +620,7 @@ class DRLAgent:
         tickers_all = state_loader.get_all_tickers()
 
         # Keep a single ordered list of tickers and parallel lists of series for safe alignment
-        col_keys = [] # ["AAPL", "MSFT", ...] in deterministic order
+        col_keys = [] # ['AAPL', 'MSFT', ...] in deterministic order
         sig_series_list = [] # [Series-of-dicts, ...]
         px_series_list  = [] # [Series-of-floats, ...]
         
@@ -678,7 +683,7 @@ class DRLAgent:
             sig_series_list.append(pd.Series(sig_cells, index=df_idx))
             px_series_list.append(pd.Series(close_px, index=df_idx))
 
-        # Concatenate into DataFrames with single-level "Ticker" columns
+        # Concatenate into DataFrames with single-level 'Ticker' columns
         if len(sig_series_list) == 0:
             signals_df = pd.DataFrame()
             prices_df  = pd.DataFrame()
@@ -688,19 +693,19 @@ class DRLAgent:
             prices_df  = pd.concat(px_series_list,  axis=1, join='outer')
 
             # Set columns to a simple Index of tickers
-            signals_df.columns = pd.Index(col_keys, name="Ticker")
-            prices_df.columns  = pd.Index(col_keys, name="Ticker")
+            signals_df.columns = pd.Index(col_keys, name='Ticker')
+            prices_df.columns  = pd.Index(col_keys, name='Ticker')
 
         # Save artifacts
-        out_dir = test_config.get("outputs_dir")
+        out_dir = test_config.get('outputs_dir')
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            signals_path = os.path.join(out_dir, f"signals_{ts}.pkl")
-            prices_path  = os.path.join(out_dir, f"prices_{ts}.pkl")
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            signals_path = os.path.join(out_dir, f'signals_{ts}.pkl')
+            prices_path  = os.path.join(out_dir, f'prices_{ts}.pkl')
             signals_df.to_pickle(signals_path)
             prices_df.to_pickle(prices_path)
-            print(f"Saved signals to {signals_path}")
-            print(f"Saved prices  to {prices_path}")
+            print(f'Saved signals to {signals_path}')
+            print(f'Saved prices  to {prices_path}')
 
         return signals_df, prices_df
