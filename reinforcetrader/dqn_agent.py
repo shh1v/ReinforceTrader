@@ -9,9 +9,11 @@ from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from typing import Any
+import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Input, optimizers
+
+from typing import Any
 from collections import deque
 from tqdm import tqdm
 
@@ -54,6 +56,7 @@ class DualBranchDQN(keras.Model):
         fused_branch = layers.Dense(32, activation="relu")(fused_branch)
         fused_branch = layers.Dropout(0.1)(fused_branch)
         fused_branch = layers.Dense(16, activation="relu")(fused_branch)
+        
         Q = layers.Dense(action_size, name="q_values")(fused_branch)
 
         model_input = {"motif_input": motif_input, "context_input": context_input}
@@ -74,10 +77,14 @@ class DRLAgent:
         self._num_context_feat = agent_config['num_context_features']
         
         # A = {0: buy, 1: hold-out, 2: sell, 3: hold-in}
+        self._action_size = 4
+        
+        # Define masks to restrict action space based on trade position
         # A_out_trade = {0: buy, 1: hold-out}
         # A_in_trade  = {2: sell, 3: hold-in}
-        
-        self._action_size = 4
+        self.in_trade_mask = tf.constant([-1e9, -1e9, 0., 0.], dtype=tf.float32)
+        self.out_trade_mask = tf.constant([0., 0., -1e9, -1e9], dtype=tf.float32)
+        self._get_mask = lambda pos: self.out_trade_mask if pos == 0 else self.in_trade_mask
 
         # Define memory to store (state, action, reward, new_state) pairs for exp. replay
         buffer_length = agent_config.get('memory_buffer_len', 10000)
@@ -115,7 +122,6 @@ class DRLAgent:
         # Init target network update and frequency
         self._init_target_network()
     
-
     def get_model(self) -> keras.Model:
         return self._model
 
@@ -174,7 +180,7 @@ class DRLAgent:
         
         # Predict q values through DQN        
         model_input = self._get_states(state_matrix, prev_pos)
-        q_values = self._model.predict(x=model_input, verbose=0)
+        q_values = self._model(model_input, training=False)
 
         return q_values
     
@@ -193,28 +199,21 @@ class DRLAgent:
                 return np.random.randint(2, 4)
 
         # Pick action from DQN 1 - epsilon% times
-        # mask is used to restrict action space
-        if prev_pos == 0:
-            mask = np.array([0, 0, -np.inf, -np.inf])
-        else:
-            mask = np.array([-np.inf, -np.inf, 0, 0])
-            
-        # Dont use dropout as act() function is not used
-        # for gradient descent updates
-        q_values = self.get_q_values(state_matrix, prev_pos)
-        restricted_q_values = mask + q_values
+        # Dont use dropout as act() function is not used for gradient descent updates
+        # Compute Q values from DQN and restrict action space
+        q_values = self.get_q_values(state_matrix, prev_pos) + self._get_mask(prev_pos)
         
-        return int(np.argmax(restricted_q_values[0]))
+        return int(tf.argmax(q_values[0]).numpy())
 
     def exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
-            return 0.0
+            raise ValueError("Not enough samples in memory to perform experience replay")
 
-        # Prefer uniform sampling over entire buffer (stability)
+        # Prefer uniform sampling to break time correlations
         idx = np.random.choice(len(self._memory), size=batch_size, replace=False)
         batch = [self._memory[i] for i in idx]
 
-        # Prepare the batch arrays for efficient processing by GPU
+        # Prepare the batch arrays
         B, W, M, C = batch_size, self._window_size, self._num_motif_feat, self._num_context_feat
         motif_batch = np.empty((B, W, M), dtype=np.float32)
         context_batch = np.empty((B, W*C + 1), dtype=np.float32)
@@ -224,7 +223,7 @@ class DRLAgent:
         rewards = np.empty((B,), dtype=np.float32)
         
         # Create a mask to restrict the action space
-        mask_next = np.empty((B, self._action_size), dtype=np.float32)
+        action_mask = []
 
         for i, (state, prev_pos, action, reward, next_state, pos_t) in enumerate(batch):
             # Extract state components for feeding to DQN braches
@@ -241,41 +240,40 @@ class DRLAgent:
             next_context_batch[i] = np.concatenate([next_ctx, np.array([pos_t], dtype=np.float32)], axis=0)
             
             # Add the appropriate mask based on pos_t
-            if pos_t == 0:
-                # Only allow buy, hold-out when not in trade
-                mask_next[i] = np.array([0, 0, -np.inf, -np.inf])
-            else:
-                # Only allow sell, hold-in when in trade
-                mask_next[i] = np.array([-np.inf, -np.inf, 0, 0])
+            action_mask.append(self._get_mask(pos_t))
             
             # Set the action and reward
             actions[i] = action
             rewards[i] = reward
         
+        # Create tensor for action mask and rewards for arithmetic later
+        action_mask = tf.stack(action_mask, axis=0)
+        rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
+        
         # Prepare current and next state inputs
         curr_state = {"motif_input": motif_batch, "context_input": context_batch}
         next_state = {"motif_input": next_motif_batch, "context_input": next_context_batch}
         
-        # Predict Q values for current and next states
-        q_current = self._model.predict(curr_state, verbose=0)
-        q_next_online = self._model.predict(next_state, verbose=0)
-        q_next_target = self._target_model.predict(next_state, verbose=0)
-
-        # Apply the mask on the q_next table to restrict action choosing
-        q_next_online += mask_next
-        q_next_target += mask_next
+        # Predict Q values for current and next states and restrict action space
+        q_current = self._model(curr_state, training=False)
+        q_next_online = self._model(next_state, training=False) + action_mask
+        q_next_target = self._target_model(next_state, training=False) + action_mask
         
         # Compute and update to the ideal or target q table
-        # Note: use online table to get max action for next state
-        # Then, use the target table q value for that next state and max action
-        a_star = np.argmax(q_next_online, axis=1)
-        max_q_next = q_next_target[np.arange(B), a_star].astype(np.float32)
+        # Note: use online table to get action with highest q value for next state
+        # Then, use the target table q table for that next state to compute q value
+        a_star = tf.argmax(q_next_online, axis=1, output_type=tf.int32)
+        batch_indices = tf.range(B, dtype=tf.int32)
+        max_q_next = tf.gather_nd(q_next_target, tf.stack([batch_indices, a_star], axis=1))
         
+        # Compute observed returns using Bellman equation
         returns = rewards + (self._gamma * max_q_next)
-        targets = q_current.copy()
-        targets[np.arange(B), actions] = returns
+        
+        # Create targets by updating only the taken actions' q values
+        target_actions = tf.stack([batch_indices, tf.convert_to_tensor(actions, dtype=tf.int32)], axis=1)
+        targets = tf.tensor_scatter_nd_update(q_current, target_actions, returns)
 
-        loss = self._model.train_on_batch({"motif_input": motif_batch, "context_input": context_batch}, targets)
+        loss = self._model.train_on_batch(curr_state, targets)
         self.update_target_network(tau=0.005)
 
         return float(loss)
