@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Input, optimizers
+import tensorflow.keras.ops as K
 
 from typing import Any
 from collections import deque
@@ -22,19 +23,14 @@ from .state import EpisodeStateLoader
 @keras.utils.register_keras_serializable()
 # Define DQN Model Architecture
 class DualBranchDQN(keras.Model):
-    def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int, learning_rate: float) -> None:
+    def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int, learning_rate: float, dropout_p: float=0.1) -> None:
         super().__init__()
 
         # Motif Branch for finding 1-day price movement patterns using Conv1D
         motif_input = Input(shape=motif_state_shape, name='motif_input')
-        motif_layer = layers.Conv1D(filters=16, kernel_size=1, padding='same', activation='relu')(motif_input)
-        motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
-        
+        motif_layer = layers.Conv1D(filters=32, kernel_size=1, padding='same', activation='relu')(motif_input)
         motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(motif_layer)
-        motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
-        
         motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(motif_layer)
-        motif_layer = layers.SpatialDropout1D(0.1)(motif_layer)
         
         motif_max = layers.GlobalMaxPooling1D()(motif_layer)
         motif_avg = layers.GlobalAveragePooling1D()(motif_layer)
@@ -44,15 +40,14 @@ class DualBranchDQN(keras.Model):
         # Context Branch consisting of technical indicators
         context_input = Input(shape=(context_state_size,), name='context_input')
         context_layer = layers.Dense(units=256, activation='relu')(context_input)
-        context_layer = layers.Dropout(0.1)(context_layer)
+        context_layer = layers.Dropout(dropout_p)(context_layer)
         context_layer = layers.Dense(units=128, activation='relu')(context_layer)
-        context_layer = layers.Dropout(0.1)(context_layer)
+        context_layer = layers.Dropout(dropout_p)(context_layer)
         context_out = layers.Dense(units=64, activation='relu', name='context_output')(context_layer)
         
         # Late fusion of both the motif and context branches
         fused_branch = layers.Concatenate(name='late_fusion')([motif_out, context_out])
         fused_branch = layers.Dense(64, activation='relu')(fused_branch)
-        fused_branch = layers.Dropout(0.1)(fused_branch)
         fused_branch = layers.Dense(32, activation='relu')(fused_branch)
         
         # State and Advantage value stream layers for Dueling DQN
@@ -62,7 +57,9 @@ class DualBranchDQN(keras.Model):
         A = layers.Dense(action_size, name='advantage_value')(A)
         
         # Combine to compute the Q values
-        Q = V + (A - tf.reduce_mean(A, axis=1, keepdims=True))
+        mA = K.mean(A, axis=1, keepdims=True)
+        cA = layers.Subtract(name='center_advantage')([A, mA])
+        Q = layers.Add(name='q_values')([V, cA])
         
         model_input = {'motif_input': motif_input, 'context_input': context_input}
         self._model = keras.Model(inputs=model_input, outputs=Q, name='DualBranchDQN')
@@ -115,6 +112,7 @@ class DRLAgent:
         n_updates = agent_config.get('decay_updates', 25000) # No. of updates to minimum epsilon
         self._epsilon_decay = (self._epsilon_min / self._epsilon) ** (1.0 / n_updates)
         learning_rate = agent_config.get('learning_rate', 1e-3)
+        dropout_p = agent_config.get('dropout_p', 0.1)
 
 
         # Load model or define new
@@ -122,7 +120,7 @@ class DRLAgent:
             print(f'Loading model from {self._model_path}')
             self._model = keras.models.load_model(model_path)
         else:
-            self._model = self._init_model(learning_rate)
+            self._model = self._init_model(learning_rate, dropout_p)
         
         # Init target network update and frequency
         self._init_target_network()
@@ -130,14 +128,14 @@ class DRLAgent:
     def get_model(self) -> keras.Model:
         return self._model
 
-    def _init_model(self, learning_rate) -> keras.Model:
+    def _init_model(self, learning_rate: float, dropout_p: float) -> keras.Model:
         # Compute state shapes for the model
         motif_shape = (self._window_size, self._num_motif_feat)
         # Note: Add 1 to include the pos_t flag
         context_size = self._window_size * self._num_context_feat + 1
 
         # Init model
-        dual_dqn = DualBranchDQN(motif_shape, context_size, self._action_size, learning_rate)
+        dual_dqn = DualBranchDQN(motif_shape, context_size, self._action_size, learning_rate, dropout_p)
 
         return dual_dqn.get_model()
 
@@ -186,7 +184,7 @@ class DRLAgent:
         # Predict q values through DQN        
         model_input = self._get_states(state_matrix, prev_pos)
         q_values = self._model(model_input, training=False)
-
+        
         return q_values
     
     def act(self, state_matrix: np.ndarray, prev_pos: int, training: bool=True) -> int:
@@ -206,9 +204,10 @@ class DRLAgent:
         # Pick action from DQN 1 - epsilon% times
         # Dont use dropout as act() function is not used for gradient descent updates
         # Compute Q values from DQN and restrict action space
-        q_values = self.get_q_values(state_matrix, prev_pos) + self._get_mask(prev_pos)
+        q_values = self.get_q_values(state_matrix, prev_pos) + self._get_mask(prev_pos) # type: ignore
+        action = int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
         
-        return int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
+        return action
 
     def exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
@@ -419,7 +418,7 @@ class DRLAgent:
             
             # Print the validation summary
             print(f'Episode {e} validation summary:')
-            print(f"Train loss: {train_loss:.4f}, Val loss: {-val_result['sum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
+            print(f"Train loss: {train_loss:.4f}, Total Sum Reward: {val_result['sum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
             print(f"Trade Duration: {val_result['trade_duration']:.2f}, Total PnL: {val_result['total_pnl']:.2f}, Profit Factor: {val_result['profit_factor']:.3f}")
             print(f"Force End Trade Count: {val_result['force_end_trades']}, Force End PnL: {val_result['force_end_pnl']:.2f}")
             
@@ -490,7 +489,6 @@ class DRLAgent:
                 
                 ex_ret_t = state_loader.get_reward_computes('validate', episode_id, ticker, t)
                 reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
-                
                 total_reward += float(reward)
 
                 # Trade performance tracking
