@@ -4,6 +4,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 
 import json
+import math
 import numpy as np
 from datetime import datetime
 import pandas as pd
@@ -13,6 +14,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Input, optimizers
 import tensorflow.keras.ops as K
+from tensorflow.keras.utils import plot_model
 
 from typing import Any
 from collections import deque
@@ -69,23 +71,27 @@ class DualBranchDQN(keras.Model):
         return self._model
 
 class DRLAgent:
-    def __init__(self, agent_config, reward_params: dict[str, object], model_path: str | None=None) -> None:
-        # Store the reward parameters which are used to compute the reward
-        self._reward_params = reward_params
-        
+    # Define constants for in-trade and out-of-trade positions
+    OUT_TRADE = 0
+    IN_TRADE = 1
+    
+    def __init__(self, agent_config, reward_type: str='DSR', model_path: str | None=None) -> None:
         # Store state and action representation configurations
         self._window_size = agent_config['state_matrix_window']
         self._num_motif_feat = agent_config['num_motif_features']
         self._num_context_feat = agent_config['num_context_features']
+        if reward_type not in {'DSR', 'DDDR', 'PNL'}:
+            raise ValueError(f'Invalid reward type: {reward_type}')
+        self.reward_type = reward_type
         
-        # A = {0: buy, 1: hold-out, 2: sell, 3: hold-in}
-        self._action_size = 4
+        # A = {0: buy, 1: hold, 2: sell}
+        self._action_size = 3
         
         # Define masks to restrict action space based on trade position
-        # A_out_trade = {0: buy, 1: hold-out}
-        # A_in_trade  = {2: sell, 3: hold-in}
-        self.in_trade_mask = tf.constant([-1e9, -1e9, 0., 0.], dtype=tf.float32)
-        self.out_trade_mask = tf.constant([0., 0., -1e9, -1e9], dtype=tf.float32)
+        # A_out_trade = {0: buy, 1: hold}
+        # A_in_trade  = {1: hold, 2: sell}
+        self.in_trade_mask = tf.constant([-1e9, 0., 0.], dtype=tf.float32)
+        self.out_trade_mask = tf.constant([0., 0., -1e9], dtype=tf.float32)
         self._get_mask = lambda pos: self.out_trade_mask if pos == 0 else self.in_trade_mask
 
         # Define memory to store (state, action, reward, new_state) pairs for exp. replay
@@ -145,7 +151,7 @@ class DRLAgent:
         self._target_model.set_weights(self._model.get_weights())
 
 
-    def update_target_network(self, tau: float = 1.0) -> None:
+    def _update_target_network(self, tau: float = 1.0) -> None:
         # tau = 1.0 : hard update (copy weights exactly)
         # tau < 1.0 : soft/Polyak update (exponential moving average)
         
@@ -176,7 +182,7 @@ class DRLAgent:
 
         return {'motif_input': motif_input, 'context_input': context_input}
     
-    def get_q_values(self, state_matrix: np.ndarray, prev_pos: int) -> tf.Tensor:
+    def _get_q_values(self, state_matrix: np.ndarray, prev_pos: int) -> tf.Tensor:
         # Note: prev_pos is 0 if out of trade or 1 is in trade.
         if prev_pos not in {0, 1}:
             raise ValueError(f'Invalid trade position: {prev_pos}')
@@ -187,7 +193,7 @@ class DRLAgent:
         
         return q_values
     
-    def act(self, state_matrix: np.ndarray, prev_pos: int, training: bool=True) -> int:
+    def _act(self, state_matrix: np.ndarray, prev_pos: int, training: bool=True) -> int:
         if prev_pos not in {0, 1}:
             raise ValueError(f'Invalid trade position: {prev_pos}')
         
@@ -204,12 +210,12 @@ class DRLAgent:
         # Pick action from DQN 1 - epsilon% times
         # Dont use dropout as act() function is not used for gradient descent updates
         # Compute Q values from DQN and restrict action space
-        q_values = self.get_q_values(state_matrix, prev_pos) + self._get_mask(prev_pos) # type: ignore
+        q_values = self._get_q_values(state_matrix, prev_pos) + self._get_mask(prev_pos) # type: ignore
         action = int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
         
         return action
 
-    def exp_replay(self, batch_size: int) -> float:
+    def _exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
             raise ValueError('Not enough samples in memory to perform experience replay')
 
@@ -278,25 +284,59 @@ class DRLAgent:
         targets = tf.tensor_scatter_nd_update(q_current, target_actions, returns)
 
         loss = self._model.train_on_batch(curr_state, targets)
-        self.update_target_network(tau=0.005)
+        self._update_target_network(tau=0.005)
 
         return float(loss)
 
-    @staticmethod
-    def _softmax_weighted_sum(ex_ret, S, tau, positive=True) -> np.float32:
-        if tau <= 0:
-            raise ValueError('tau must be > 0')
+    def _compute_reward(self, params: dict[str, float]) -> float:
+        def _require_keys(keys, params):
+            missing = [k for k in keys if k not in params]
+            if missing:
+                raise ValueError(f"Missing required reward parameters: {missing}")
+            
+        match self.reward_type:
+            case 'DSR':
+                _require_keys(['Rt', 'A_tm1', 'B_tm1'], params)
+                return self._DSR(params['Rt'], params['A_tm1'], params['B_tm1'])
+            case 'DDDR':
+                _require_keys(['Rt', 'A_tm1', 'DD_tm1'], params)
+                return self._DDDR(params['Rt'], params['A_tm1'], params['DD_tm1'])
+            case 'PNL':
+                _require_keys(['Rt'], params)
+                return self._PnL(params['Rt'])
+            case _:
+                raise ValueError(f'Invalid reward type: {self.reward_type}')
+            
+    
+    def _DSR(self, Rt, A_tm1, B_tm1, eps: float = np.finfo(float).eps) -> float:
         
-        X = np.array([ex_ret[f'ExRet{s}'] for s in S], dtype=np.float32)
-        sign = 1.0 if positive else -1.0
-        logits = (sign * X) / float(tau)
-        m = max(logits)
-        exp_shifted = np.exp(logits - m)
-        W = exp_shifted / exp_shifted.sum()
+        # Compute delta values
+        dAt = Rt - A_tm1
+        dBt = Rt*Rt - B_tm1
+
+        num = B_tm1 * dAt - 0.5 * A_tm1 * dBt
+        denom = (B_tm1 - A_tm1 ** 2) ** 1.5 + eps
+
+        return num / denom
+    
+    def _PnL(self, Rt: float) -> float:
+        # Simple profit and loss reward
+        return np.log1p(Rt)
+
+    
+    def _DDDR(self, Rt, A_tm1, DD_tm1, eps: float=np.finfo(float).eps) -> float:
+        # Compute the Differential Downside Deviation Ratio
+        # (as derived in https://doi.org/10.1109/72.935097)
         
-        return (W * X).sum()
-
-
+        if Rt > 0:
+            num = Rt - 0.5 * A_tm1
+            denom = DD_tm1 + eps
+        else:
+            num = (DD_tm1 ** 2) * (Rt - 0.5 * A_tm1) - (0.5 * A_tm1 * Rt ** 2)
+            denom = DD_tm1 ** 3 + eps
+                
+        return num / denom
+    
     def calculate_reward(self, prev_pos, action, ex_ret: dict[str, np.float32]) -> tuple[float, int]:
         # Note 1: prev_pos is 0 if out of trade or 1 is in trade.
         # Note 2: If prev_pos is 0, valid actions are {0: buy, 1: hold-out}.
@@ -385,7 +425,7 @@ class DRLAgent:
 
                 for t in range(t0, L - 1):
                     # Find action based on behaviour policy
-                    action = self.act(state, prev_pos)
+                    action = self._act(state, prev_pos)
 
                     ex_ret_t = state_loader.get_reward_computes('train', e, ticker, t)
                     reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
@@ -402,7 +442,7 @@ class DRLAgent:
                     if len(self._memory) >= replay_start_size:
                         # Train every train_interval steps
                         if env_steps % train_interval == 0:
-                            loss = self.exp_replay(batch_size)
+                            loss = self._exp_replay(batch_size)
                             train_loss += loss
                                 
                             # Decay epsilon slowly until min
@@ -484,7 +524,7 @@ class DRLAgent:
             entry_price = None
 
             for t in range(t0, L - 1):
-                action = self.act(state, prev_pos, training=False)
+                action = self._act(state, prev_pos, training=False)
                 curr_price = state_loader.get_state_OHLCV('validate', episode_id, ticker, t)['Close']
                 
                 ex_ret_t = state_loader.get_reward_computes('validate', episode_id, ticker, t)
@@ -647,7 +687,7 @@ class DRLAgent:
                 curr_close = state_loader.get_state_OHLCV('test', episode_id, ticker, t)['Close']
                 close_px[t] = curr_close
 
-                action = self.act(state, prev_pos, training=False)
+                action = self._act(state, prev_pos, training=False)
                 sig_cells[t] = self._action_to_onehot(action) # type: ignore
 
                 # Compute whether in trade or out of trade for next step
