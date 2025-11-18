@@ -186,10 +186,10 @@ class DRLAgent:
         # Expand dims from [window, num_features] to [batch_size=1, window, num_features]
         motif_input = np.expand_dims(state_matrix[:, :self._num_motif_feat], axis=0).astype(np.float32)
 
-        # Flatted the context input and combine with other features (e.g. trade pos, reward params)
+        # Flatten the context input and combine with other features (e.g. trade pos, reward params)
         context_flat = state_matrix[:, self._num_motif_feat:].astype(np.float32).reshape(1, -1)
-        ext_ctx_feat = np.array([extra_features], dtype=np.float32)
-        context_input = np.concatenate([context_flat, ext_ctx_feat], axis=1)
+        extra_context = np.array([extra_features], dtype=np.float32)
+        context_input = np.concatenate([context_flat, extra_context], axis=1)
 
         return {'motif_input': motif_input, 'context_input': context_input}
     
@@ -218,10 +218,10 @@ class DRLAgent:
         # Dont use dropout as act() function is not used for gradient descent updates
         
         # Construct the extra set of computes used to construct state representation
-        MDP_comp_feats = [trade_pos] + extra_features
+        extra_context = [trade_pos] + extra_features
         
         # Compute Q values from DQN and restrict action space
-        q_values = self._get_q_values(state_matrix, MDP_comp_feats) + self._get_mask(trade_pos) # type: ignore
+        q_values = self._get_q_values(state_matrix, extra_context) + self._get_mask(trade_pos) # type: ignore
         action = int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
         
         return action
@@ -236,39 +236,42 @@ class DRLAgent:
 
         # Prepare the batch arrays
         B, W, M, C = batch_size, self._window_size, self._num_motif_feat, self._num_context_feat
+        extra_context_len = len(self._reward_param_keys(self.reward_type)) # (...) + 1 - 1
         motif_batch = np.empty((B, W, M), dtype=np.float32)
-        context_batch = np.empty((B, W*C + 1), dtype=np.float32)
+        context_batch = np.empty((B, W*C + extra_context_len), dtype=np.float32)
         next_motif_batch = np.empty((B, W, M), dtype=np.float32)
-        next_context_batch = np.empty((B, W*C + 1), dtype=np.float32)
+        next_context_batch = np.empty((B, W*C + extra_context_len), dtype=np.float32)
         actions = np.empty((B,), dtype=np.int32)
         rewards = np.empty((B,), dtype=np.float32)
         
         # Create a mask to restrict the action space
-        action_mask = []
+        next_action_mask = []
 
-        for i, (state, prev_pos, action, reward, next_state, pos_t) in enumerate(batch):
+        for i, (state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos) in enumerate(batch):
             # Extract state components for feeding to DQN braches
             # Compute the current state features for dual branch
             motif = state[:, :M].astype(np.float32)
             ctx = state[:, M:].astype(np.float32).reshape(-1)
             motif_batch[i] = motif
-            context_batch[i] = np.concatenate([ctx, np.array([prev_pos], dtype=np.float32)], axis=0)
+            context_batch[i] = np.concatenate([ctx, [prev_pos], curr_ef], axis=0, dtype=np.float32)
             
             # Compute the next state features for dual branch
             next_motif = next_state[:, :M].astype(np.float32)
             next_ctx = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
             next_motif_batch[i] = next_motif
-            next_context_batch[i] = np.concatenate([next_ctx, np.array([pos_t], dtype=np.float32)], axis=0)
+            next_context_batch[i] = np.concatenate([next_ctx, [curr_pos], next_ef], axis=0, dtype=np.float32)
             
-            # Add the appropriate mask based on pos_t
-            action_mask.append(self._get_mask(pos_t))
+            # Add the appropriate mask based on curr_pos
+            # NOTE: Action mask is used for masking next q values.
+            # Thus, curr_pos is used instead of prev_pos
+            next_action_mask.append(self._get_mask(curr_pos))
             
             # Set the action and reward
             actions[i] = action
             rewards[i] = reward
         
         # Create tensor for action mask and rewards for arithmetic later
-        action_mask = tf.stack(action_mask, axis=0)
+        next_action_mask = tf.stack(next_action_mask, axis=0)
         rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
         
         # Prepare current and next state inputs
@@ -276,13 +279,14 @@ class DRLAgent:
         next_state = {'motif_input': next_motif_batch, 'context_input': next_context_batch}
         
         # Predict Q values for current and next states and restrict action space
+        # NOTE: training=False for not using dropout layers.
         q_current = self._model(curr_state, training=False)
-        q_next_online = self._model(next_state, training=False) + action_mask
-        q_next_target = self._target_model(next_state, training=False) + action_mask
+        q_next_online = self._model(next_state, training=False) + next_action_mask
+        q_next_target = self._target_model(next_state, training=False) + next_action_mask
         
-        # Compute and update to the ideal or target q table
+        # Double DQN next q computation
         # Note: use online table to get action with highest q value for next state
-        # Then, use the target table q table for that next state to compute q value
+        # Then, use the target table q table to compute q value for next state
         a_star = tf.argmax(q_next_online, axis=1, output_type=tf.int32)
         batch_indices = tf.range(B, dtype=tf.int32)
         max_q_next = tf.gather_nd(q_next_target, tf.stack([batch_indices, a_star], axis=1))
@@ -372,7 +376,7 @@ class DRLAgent:
             case _:
                 return {}
     
-    def _update_reward_computes(self, Rt, n: float=1e-4):
+    def _update_reward_computes(self, Rt, n: float=1e-4) -> dict[str, float]:
         match self.reward_type:
             case 'DSR':
                 self._r_A_tm1 += n * (Rt - self._r_A_tm1)
@@ -382,6 +386,7 @@ class DRLAgent:
                 self._r_DD2_tm1 += n * (min(Rt, 0) ** 2 - self._r_DD2_tm1)
             case 'PNL':
                 pass
+        return self._get_reward_state_computes()
 
     def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any]) -> dict[str, Any]:
         # Make req. directories if not exist
@@ -419,11 +424,16 @@ class DRLAgent:
                 self._init_reward_state_computes()
 
                 for t in range(t0, L - 1):
-                    # Find action based on behaviour policy
-                    rs_computes = self._get_reward_state_computes()
+                    # Get the reward computes that are included in the state representation
+                    reward_computes = self._get_reward_state_computes()
+                    # Store the current extra features (ef) for exp. replay
+                    curr_ef = list(reward_computes.values())
                     
                     # Derive action based on eps-greedy policy
-                    action = self._act(state, prev_pos, list(rs_computes.values()))
+                    # NOTE: Here, extra features are some computes that are used
+                    # to compute the reward. To make a valid MDP, there variables
+                    # are included in the state representation
+                    action = self._act(state, prev_pos, curr_ef)
                     
                     # Compute the current trade position based on new action
                     if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY: # buy
@@ -431,17 +441,25 @@ class DRLAgent:
                     elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL: # Sell
                         curr_pos = DRLAgent.IN_TRADE
                     
-                    # Append the return value for reward calculation                    
-                    Rt = state_loader.get_reward_computes('train', e, ticker, t)['Rt']
-                    rs_computes['Rt'] = Rt
+                    # Append the return value for reward calculation
+                    if curr_pos == DRLAgent.IN_TRADE:
+                        Rt = state_loader.get_reward_computes('train', e, ticker, t)['Rt']
+                    else:
+                        Rt = 0
+                        
+                    reward_computes['Rt'] = Rt
                     
                     # Compute the reward value for the state-action pair
-                    reward = self._compute_reward(rs_computes)
+                    reward = self._compute_reward(reward_computes)
 
+                    # Get the next state
                     next_state = state_loader.get_state_matrix('train', e, ticker, t + 1, self._window_size)
 
+                    # Update the reward compute variables and store the computes features
+                    next_ef = list(self._update_reward_computes(Rt).values())
+                    
                     # store transition
-                    self._memory.append((state, prev_pos, action, reward, next_state, curr_pos))
+                    self._memory.append((state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos))
 
                     # Update env steps taken
                     env_steps += 1
