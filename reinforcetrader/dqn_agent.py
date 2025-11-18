@@ -75,6 +75,11 @@ class DRLAgent:
     OUT_TRADE = 0
     IN_TRADE = 1
     
+    # Define constants that represent agent behaviour
+    A_BUY = 0
+    A_HOLD = 1
+    A_SELL = 2
+    
     def __init__(self, agent_config, reward_type: str='DSR', model_path: str | None=None) -> None:
         # Store state and action representation configurations
         self._window_size = agent_config['state_matrix_window']
@@ -92,7 +97,7 @@ class DRLAgent:
         # A_in_trade  = {1: hold, 2: sell}
         self.in_trade_mask = tf.constant([-1e9, 0., 0.], dtype=tf.float32)
         self.out_trade_mask = tf.constant([0., 0., -1e9], dtype=tf.float32)
-        self._get_mask = lambda pos: self.out_trade_mask if pos == 0 else self.in_trade_mask
+        self._get_mask = lambda pos: self.out_trade_mask if pos == DRLAgent.OUT_TRADE else self.in_trade_mask
 
         # Define memory to store (state, action, reward, new_state) pairs for exp. replay
         buffer_length = agent_config.get('memory_buffer_len', 10000)
@@ -137,13 +142,19 @@ class DRLAgent:
     def _init_model(self, learning_rate: float, dropout_p: float) -> keras.Model:
         # Compute state shapes for the model
         motif_shape = (self._window_size, self._num_motif_feat)
-        # Note: Add 1 to include the pos_t flag
-        context_size = self._window_size * self._num_context_feat + 1
+        
+        # Compute the number of reward params to make its a valid MDP
+        # Note: num_reward_params should have -1 (Rt is not included)
+        # and +1 (trade pos is included). Thus net 0
+        num_reward_params = len(self._reward_param_keys(self.reward_type))
+        
+        # Compute the context size
+        context_size = self._window_size * self._num_context_feat + num_reward_params
 
         # Init model
-        dual_dqn = DualBranchDQN(motif_shape, context_size, self._action_size, learning_rate, dropout_p)
+        DDDQN = DualBranchDQN(motif_shape, context_size, self._action_size, learning_rate, dropout_p)
 
-        return dual_dqn.get_model()
+        return DDDQN.get_model()
 
     def _init_target_network(self) -> None:
         # Make a structural clone and copy weights
@@ -165,7 +176,7 @@ class DRLAgent:
         self._target_model.set_weights(new_weights)
 
     
-    def _get_states(self, state_matrix: np.ndarray, prev_pos: int) -> dict[str, np.ndarray]:
+    def _get_states(self, state_matrix: np.ndarray, extra_features: list[float]) -> dict[str, np.ndarray]:
         # Check the state matrix shape is correct
         total_features = self._num_motif_feat + self._num_context_feat
         if state_matrix.shape != (self._window_size, total_features):
@@ -175,42 +186,42 @@ class DRLAgent:
         # Expand dims from [window, num_features] to [batch_size=1, window, num_features]
         motif_input = np.expand_dims(state_matrix[:, :self._num_motif_feat], axis=0).astype(np.float32)
 
-        # Flatted the context input and combine with post_t
+        # Flatted the context input and combine with other features (e.g. trade pos, reward params)
         context_flat = state_matrix[:, self._num_motif_feat:].astype(np.float32).reshape(1, -1)
-        prev_pos_arr = np.array([[float(prev_pos)]], dtype=np.float32)
-        context_input = np.concatenate([context_flat, prev_pos_arr], axis=1)
+        ext_ctx_feat = np.array([extra_features], dtype=np.float32)
+        context_input = np.concatenate([context_flat, ext_ctx_feat], axis=1)
 
         return {'motif_input': motif_input, 'context_input': context_input}
     
-    def _get_q_values(self, state_matrix: np.ndarray, prev_pos: int) -> tf.Tensor:
-        # Note: prev_pos is 0 if out of trade or 1 is in trade.
-        if prev_pos not in {0, 1}:
-            raise ValueError(f'Invalid trade position: {prev_pos}')
-        
+    def _get_q_values(self, state_matrix: np.ndarray, extra_features: list[float]) -> tf.Tensor:
         # Predict q values through DQN        
-        model_input = self._get_states(state_matrix, prev_pos)
+        model_input = self._get_states(state_matrix, extra_features)
         q_values = self._model(model_input, training=False)
         
         return q_values
     
-    def _act(self, state_matrix: np.ndarray, prev_pos: int, training: bool=True) -> int:
-        if prev_pos not in {0, 1}:
-            raise ValueError(f'Invalid trade position: {prev_pos}')
+    def _act(self, state_matrix: np.ndarray, trade_pos: int, extra_features: list[float], training: bool=True) -> int:
+        if trade_pos not in {DRLAgent.IN_TRADE, DRLAgent.OUT_TRADE}:
+            raise ValueError(f'Invalid trade position: {trade_pos}')
         
         # Defines an epsilon-greedy behaviour policy
         # Pick random action epsilon times
         if training and np.random.random() < self._epsilon:
-            if prev_pos == 0:
-                # A_{Out of trade}: {0: buy, 1: hold-out}
-                return np.random.randint(0, 2)
+            if trade_pos == DRLAgent.OUT_TRADE:
+                # A_{Out of trade}: {0: buy, 1: hold (out)}
+                return np.random.randint(0, 1)
             else:
-                # A_{In trade}: {2: sell, 3: hold-in}
-                return np.random.randint(2, 4)
+                # A_{In trade}: {1: hold (in), 2: sell}
+                return np.random.randint(1, 2)
 
-        # Pick action from DQN 1 - epsilon% times
+        # Pick action from DQN with probability 1 - epsilon
         # Dont use dropout as act() function is not used for gradient descent updates
+        
+        # Construct the extra set of computes used to construct state representation
+        MDP_comp_feats = [trade_pos] + extra_features
+        
         # Compute Q values from DQN and restrict action space
-        q_values = self._get_q_values(state_matrix, prev_pos) + self._get_mask(prev_pos) # type: ignore
+        q_values = self._get_q_values(state_matrix, MDP_comp_feats) + self._get_mask(trade_pos) # type: ignore
         action = int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
         
         return action
@@ -288,28 +299,37 @@ class DRLAgent:
 
         return float(loss)
 
+    def _reward_param_keys(self, reward_type: str) -> set[str]:
+        # Small Helper method. Uff..
+        match reward_type:
+            case 'DSR':
+                return {'Rt', 'A_tm1', 'B_tm1'}
+            case 'DDDR':
+                return {'Rt', 'A_tm1', 'DD_tm1'}
+            case 'PNL':
+                return {'Rt'}
+            case _:
+                raise ValueError(f'Invalid reward type: {reward_type}')
+    
     def _compute_reward(self, params: dict[str, float]) -> float:
-        def _require_keys(keys, params):
-            missing = [k for k in keys if k not in params]
-            if missing:
-                raise ValueError(f"Missing required reward parameters: {missing}")
-            
+        # Check if all the required keys are present        
+        missing_params = [k for k in self._reward_param_keys(self.reward_type) if k not in params]
+        if missing_params:
+            raise ValueError(f"Missing required reward parameters for {self.reward_type}: {missing_params}")
+        
+        # Compute the reward based on the selected type
         match self.reward_type:
             case 'DSR':
-                _require_keys(['Rt', 'A_tm1', 'B_tm1'], params)
                 return self._DSR(params['Rt'], params['A_tm1'], params['B_tm1'])
             case 'DDDR':
-                _require_keys(['Rt', 'A_tm1', 'DD_tm1'], params)
                 return self._DDDR(params['Rt'], params['A_tm1'], params['DD_tm1'])
             case 'PNL':
-                _require_keys(['Rt'], params)
                 return self._PnL(params['Rt'])
             case _:
                 raise ValueError(f'Invalid reward type: {self.reward_type}')
             
     
     def _DSR(self, Rt, A_tm1, B_tm1, eps: float = np.finfo(float).eps) -> float:
-        
         # Compute delta values
         dAt = Rt - A_tm1
         dBt = Rt*Rt - B_tm1
@@ -337,57 +357,32 @@ class DRLAgent:
                 
         return num / denom
     
-    def calculate_reward(self, prev_pos, action, ex_ret: dict[str, np.float32]) -> tuple[float, int]:
-        # Note 1: prev_pos is 0 if out of trade or 1 is in trade.
-        # Note 2: If prev_pos is 0, valid actions are {0: buy, 1: hold-out}.
-        # If prev_pos is 1, valid actions are {2: sell, 3: hold-in}.
-
-        if prev_pos == 0 and action not in {0, 1}:
-            raise ValueError(f'Invalid action {action} when out of trade')
-        if prev_pos == 1 and action not in {2, 3}:
-            raise ValueError(f'Invalid action {action} when in trade')
-        
-        # Extract reward function params
-        Hb, Hs = self._reward_params['Hb'], self._reward_params['Hs']
-        tb, ts = self._reward_params['tb'], self._reward_params['ts']
-        cost = self._reward_params['cost']
-        gamma = self._reward_params['gamma']
-        alpha, beta = self._reward_params['alpha'], self._reward_params['beta']
-        lam = self._reward_params['lambda']
-        upsilon, mu = self._reward_params['upsilon'], self._reward_params['mu']
-        
-        # Compute the reward based on action and expected returns
-        if prev_pos == 0:
-            # A_{Out of trade}: {0: buy, 1: hold-out}
-            if action == 0:
-                # buy signal was given when out of trade
-                g = gamma * DRLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
-                reward = g - cost # type: ignore
-                pos_t = 1
-            else:
-                # hold-out signal was given when out of trade
-                avoid_loss = -DRLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False)
-                miss_gain = DRLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True)
-                reward = alpha * max(0.0, avoid_loss) - beta * max(0.0, miss_gain) # type: ignore
-                pos_t = 0
-        elif prev_pos == 1:
-            # A_{In trade}: {2: sell, 3: hold-in}
-            if action == 2:
-                # sell signal was given when in trade
-                g = -lam * DRLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False) # type: ignore
-                reward = max(0.0, g) - cost # type: ignore
-                pos_t = 0
-            else:
-                # hold-in signal was given when in trade
-                g_pos = upsilon * DRLAgent._softmax_weighted_sum(ex_ret, S=Hb, tau=tb, positive=True) # type: ignore
-                g_neg = mu * DRLAgent._softmax_weighted_sum(ex_ret, S=Hs, tau=ts, positive=False) # type: ignore
-                reward = max(0.0, g_pos + g_neg)
-                pos_t = 1
-        else:
-            raise ValueError(f'Invalid trade position: {prev_pos}')
-        
-        return reward, pos_t
+    def _init_reward_state_computes(self):
+        # Helper method to init/reset the compute values
+        self._r_A_tm1 = 0
+        self._r_B_tm1 = 0
+        self._r_DD2_tm1 = 0
     
+    def _get_reward_state_computes(self) -> dict[str, float]:
+        match self.reward_type:
+            case 'DSR':
+                return {'A_tm1': self._r_A_tm1, 'B_tm1': self._r_B_tm1}
+            case 'DDDR':
+                return {'A_tm1': self._r_A_tm1, 'DD_tm1': self._r_DD2_tm1 ** 0.5}
+            case _:
+                return {}
+    
+    def _update_reward_computes(self, Rt, n: float=1e-4):
+        match self.reward_type:
+            case 'DSR':
+                self._r_A_tm1 += n * (Rt - self._r_A_tm1)
+                self._r_B_tm1 += n * (Rt ** 2 - self._r_B_tm1)
+            case 'DDDR':
+                self._r_A_tm1 += n * (Rt - self._r_A_tm1)
+                self._r_DD2_tm1 += n * (min(Rt, 0) ** 2 - self._r_DD2_tm1)
+            case 'PNL':
+                pass
+
     def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any]) -> dict[str, Any]:
         # Make req. directories if not exist
         os.makedirs(train_config['model_dir'], exist_ok=True)
@@ -407,33 +402,46 @@ class DRLAgent:
 
             # Compute the total loss across the whole episode
             train_loss = 0.0
-
             # Track env steps
             env_steps = 0
-            
             # store the current value of epsilon for boosting
             epsilon_start = self._epsilon
             
             # Iterate tickers, training sequentially
             L = state_loader.get_episode_len('train', e)
             for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
-
                 # Train on this ticker for the episode (standard rollout with replay)
                 t0 = self._window_size - 1
                 state = state_loader.get_state_matrix('train', e, ticker, t0, self._window_size)
-                prev_pos = 0
+                prev_pos = DRLAgent.OUT_TRADE
+                
+                # Initalize the reward computes for the ticker
+                self._init_reward_state_computes()
 
                 for t in range(t0, L - 1):
                     # Find action based on behaviour policy
-                    action = self._act(state, prev_pos)
-
-                    ex_ret_t = state_loader.get_reward_computes('train', e, ticker, t)
-                    reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
+                    rs_computes = self._get_reward_state_computes()
+                    
+                    # Derive action based on eps-greedy policy
+                    action = self._act(state, prev_pos, list(rs_computes.values()))
+                    
+                    # Compute the current trade position based on new action
+                    if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY: # buy
+                        curr_pos = DRLAgent.IN_TRADE
+                    elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL: # Sell
+                        curr_pos = DRLAgent.IN_TRADE
+                    
+                    # Append the return value for reward calculation                    
+                    Rt = state_loader.get_reward_computes('train', e, ticker, t)['Rt']
+                    rs_computes['Rt'] = Rt
+                    
+                    # Compute the reward value for the state-action pair
+                    reward = self._compute_reward(rs_computes)
 
                     next_state = state_loader.get_state_matrix('train', e, ticker, t + 1, self._window_size)
 
                     # store transition
-                    self._memory.append((state, prev_pos, action, reward, next_state, pos_t))
+                    self._memory.append((state, prev_pos, action, reward, next_state, curr_pos))
 
                     # Update env steps taken
                     env_steps += 1
@@ -451,7 +459,7 @@ class DRLAgent:
                     
                     # Advance to the next state
                     state = next_state
-                    prev_pos = pos_t
+                    prev_pos = curr_pos
 
             # Run validation on this episode's validation set
             val_result = self._run_validation(state_loader, e, tickers_all)
