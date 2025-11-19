@@ -401,7 +401,7 @@ class DRLAgent:
         
         logs_by_episode = {}
 
-        tickers_all = state_loader.get_all_tickers()
+        all_tickers = state_loader.get_all_tickers()
 
         for e in episode_ids:
 
@@ -414,7 +414,7 @@ class DRLAgent:
             
             # Iterate tickers, training sequentially
             L = state_loader.get_episode_len('train', e)
-            for ticker in tqdm(tickers_all, desc=f'Training episode {e}', ncols=100):
+            for ticker in tqdm(all_tickers, desc=f'Training episode {e}', ncols=100):
                 # Train on this ticker for the episode (standard rollout with replay)
                 t0 = self._window_size - 1
                 state = state_loader.get_state_matrix('train', e, ticker, t0, self._window_size)
@@ -436,9 +436,9 @@ class DRLAgent:
                     action = self._act(state, prev_pos, curr_ef)
                     
                     # Compute the current trade position based on new action
-                    if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY: # buy
+                    if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
                         curr_pos = DRLAgent.IN_TRADE
-                    elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL: # Sell
+                    elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL:
                         curr_pos = DRLAgent.IN_TRADE
                     
                     # Append the return value for reward calculation
@@ -480,11 +480,11 @@ class DRLAgent:
                     prev_pos = curr_pos
 
             # Run validation on this episode's validation set
-            val_result = self._run_validation(state_loader, e, tickers_all)
+            val_result = self._run_validation(state_loader, e, all_tickers)
             
             # Print the validation summary
             print(f'Episode {e} validation summary:')
-            print(f"Train loss: {train_loss:.4f}, Total Sum Reward: {val_result['sum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
+            print(f"Train loss: {train_loss:.4f}, Cum. Sum Reward: {val_result['cum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
             print(f"Trade Duration: {val_result['trade_duration']:.2f}, Total PnL: {val_result['total_pnl']:.2f}, Profit Factor: {val_result['profit_factor']:.3f}")
             print(f"Force End Trade Count: {val_result['force_end_trades']}, Force End PnL: {val_result['force_end_pnl']:.2f}")
             
@@ -503,7 +503,7 @@ class DRLAgent:
             
         # Plot all the training and validation losses
         train_losses = [logs_by_episode[ep]['train_loss'] for ep in episode_ids]
-        val_losses = [-logs_by_episode[ep]['val_results']['sum_reward'] for ep in episode_ids]
+        val_losses = [-logs_by_episode[ep]['val_results']['cum_reward'] for ep in episode_ids]
         self._plot_losses(train_losses, val_losses, fname=os.path.join(train_config['plots_dir'], 'train_losses.png'))
         
         # Also plot the epsilon decay
@@ -525,10 +525,9 @@ class DRLAgent:
 
 
     def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]) -> dict[str, int | float]:
-        # NOTE: Assumes no exploration and only exploitation
-
-        total_reward = 0.0
-        
+        # The agent does no exploration, only exploitation
+        # Define metrics to track for validation cycle
+        cum_reward = 0.0
         total_trades = 0
         winning_trade_count = 0
         losing_trade_count = 0
@@ -549,27 +548,51 @@ class DRLAgent:
             prev_pos = 0
             entry_price = None
 
+            # Initalize the reward computes for the ticker
+            self._init_reward_state_computes()
+            
             for t in range(t0, L - 1):
-                action = self._act(state, prev_pos, training=False)
+                # Get the reward computes that are included in the state representation
+                reward_computes = self._get_reward_state_computes()
+                # Store the current extra features (ef) for deciding action
+                curr_ef = list(reward_computes.values())
+                
+                # training=False turns off exploration
+                action = self._act(state, prev_pos, curr_ef, training=False)
                 curr_price = state_loader.get_state_OHLCV('validate', episode_id, ticker, t)['Close']
                 
-                ex_ret_t = state_loader.get_reward_computes('validate', episode_id, ticker, t)
-                reward, pos_t = self.calculate_reward(prev_pos, action, ex_ret_t) # type: ignore
-                total_reward += float(reward)
+                # Compute the current trade position based on new action
+                if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
+                    curr_pos = DRLAgent.IN_TRADE
+                elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL:
+                    curr_pos = DRLAgent.IN_TRADE
+                
+                # Append the return value for reward calculation
+                if curr_pos == DRLAgent.IN_TRADE:
+                    Rt = state_loader.get_reward_computes('validate', episode_id, ticker, t)['Rt']
+                else:
+                    Rt = 0
+                
+                # Append Rt for reward calculation (used by e.g. DSR)    
+                reward_computes['Rt'] = Rt
+                
+                # Compute the reward value for the state-action pair
+                reward = self._compute_reward(reward_computes)
+                cum_reward += reward
 
                 # Trade performance tracking
-                if pos_t == 1:
+                if curr_pos == DRLAgent.IN_TRADE:
                     # Track how many days the agent is in trade
                     in_trade_days += 1
 
-                if prev_pos == 0 and pos_t == 1:
+                if prev_pos == DRLAgent.OUT_TRADE and curr_pos == DRLAgent.IN_TRADE:
                     entry_price = curr_price
                     total_trades += 1
-                elif prev_pos == 1 and (pos_t == 0 or t == L - 2):
+                elif prev_pos == DRLAgent.IN_TRADE and (curr_pos == DRLAgent.OUT_TRADE or t == L - 2):
                     if entry_price is None:
-                        raise ValueError('Entry price should not be None when exiting a trade')
+                        raise ValueError('Entry price unknown on trade close')
                     
-                    # Compute trade pnl
+                    # Compute the trade pnl
                     trade_pnl = curr_price - entry_price
                     
                     # Count how many trades had to be forcefully closed at the end
@@ -583,13 +606,15 @@ class DRLAgent:
                     else:
                         gross_loss += trade_pnl
                         losing_trade_count += 1
+                        
+                    # Reset entry price for future trades
                     entry_price = None
 
                 next_state = state_loader.get_state_matrix('validate', episode_id, ticker, t + 1, self._window_size)
                 
                 # Advance to the next state
                 state =  next_state
-                prev_pos = pos_t
+                prev_pos = curr_pos
 
         # WARNING: Metrics consider forcefully ended trades which could skew performance
         total_pnl = gross_profit + gross_loss
@@ -598,7 +623,7 @@ class DRLAgent:
         profit_factor = gross_profit / max(abs(gross_loss), 1e-12)
         
         return {
-            'sum_reward': total_reward,
+            'cum_reward': cum_reward,
             'total_trades': total_trades,
             'trade_duration': trade_duration,
             'hit_rate': hit_rate,
