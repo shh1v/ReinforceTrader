@@ -315,48 +315,63 @@ class DRLAgent:
             case _:
                 raise ValueError(f'Invalid reward type: {reward_type}')
     
-    def _compute_reward(self, params: dict[str, float]) -> float:
+    def _compute_reward(self, params: dict[str, float], action: float) -> float:
         # Check if all the required keys are present        
         missing_params = [k for k in self._reward_param_keys(self.reward_type) if k not in params]
         if missing_params:
             raise ValueError(f"Missing required reward parameters for {self.reward_type}: {missing_params}")
         
+        # Determine if transaction costs are applicable
+        if action == DRLAgent.A_HOLD:
+            tc = 0 # No cost for holding
+        else:
+            tc = 0.25 / 100 # 0.25%
+        
         # Compute the reward based on the selected type
         match self.reward_type:
             case 'DSR':
-                return self._DSR(params['Rt'], params['A_tm1'], params['B_tm1'])
+                return self._DSR(params['Rt'], params['A_tm1'], params['B_tm1'], tc)
             case 'DDDR':
-                return self._DDDR(params['Rt'], params['A_tm1'], params['DD_tm1'])
+                return self._DDDR(params['Rt'], params['A_tm1'], params['DD_tm1'], tc)
             case 'PNL':
-                return self._PnL(params['Rt'])
+                return self._PnL(params['Rt'], tc)
             case _:
                 raise ValueError(f'Invalid reward type: {self.reward_type}')
             
     
-    def _DSR(self, Rt, A_tm1, B_tm1, eps: float = np.finfo(float).eps) -> float:
+    def _DSR(self, Rt, A_tm1, B_tm1, tc, eps: float = np.finfo(float).eps) -> float:
+        # Discount the returns by the transaction cost
+        Rtd = Rt - tc
+        
         # Compute delta values
-        dAt = Rt - A_tm1
-        dBt = Rt ** 2 - B_tm1
+        dAt = Rtd - A_tm1
+        dBt = Rtd ** 2 - B_tm1
 
         num = B_tm1 * dAt - 0.5 * A_tm1 * dBt
         denom = (B_tm1 - A_tm1 ** 2) ** 1.5 + eps
 
         return num / denom
     
-    def _PnL(self, Rt: float) -> float:
+    def _PnL(self, Rt, tc: float) -> float:
+        # Discount the returns by the transaction cost
+        Rtd = Rt - tc
+        
         # Simple profit and loss reward
-        return np.log1p(Rt)
+        return np.log1p(Rtd)
 
     
-    def _DDDR(self, Rt, A_tm1, DD_tm1, eps: float=np.finfo(float).eps) -> float:
+    def _DDDR(self, Rt, A_tm1, DD_tm1, tc, eps: float=np.finfo(float).eps) -> float:
         # Compute the Differential Downside Deviation Ratio
         # (as derived in https://doi.org/10.1109/72.935097)
         
-        if Rt > 0:
-            num = Rt - 0.5 * A_tm1
+        # Discount the returns by the transaction cost
+        Rtd = Rt - tc
+        
+        if Rtd > 0:
+            num = Rtd - 0.5 * A_tm1
             denom = DD_tm1 + eps
         else:
-            num = (DD_tm1 ** 2) * (Rt - 0.5 * A_tm1) - (0.5 * A_tm1 * Rt ** 2)
+            num = (DD_tm1 ** 2) * (Rtd - 0.5 * A_tm1) - (0.5 * A_tm1 * Rtd ** 2)
             denom = DD_tm1 ** 3 + eps
                 
         return num / denom
@@ -445,7 +460,7 @@ class DRLAgent:
                     if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
                         curr_pos = DRLAgent.IN_TRADE
                     elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL:
-                        curr_pos = DRLAgent.IN_TRADE
+                        curr_pos = DRLAgent.OUT_TRADE
                     else:
                         curr_pos = prev_pos
                     
@@ -458,7 +473,7 @@ class DRLAgent:
                     reward_computes['Rt'] = Rt
                     
                     # Compute and store the reward value for the state-action pair
-                    reward = self._compute_reward(reward_computes)
+                    reward = self._compute_reward(reward_computes, action)
                     if reward_diag:
                         episode_rewards[ti, t - t0] = reward
 
@@ -604,7 +619,7 @@ class DRLAgent:
                 if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
                     curr_pos = DRLAgent.IN_TRADE
                 elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL:
-                    curr_pos = DRLAgent.IN_TRADE
+                    curr_pos = DRLAgent.OUT_TRADE
                 else:
                     curr_pos = prev_pos
                 
@@ -618,7 +633,7 @@ class DRLAgent:
                 reward_computes['Rt'] = Rt
                 
                 # Compute the reward value for the state-action pair
-                reward = self._compute_reward(reward_computes)
+                reward = self._compute_reward(reward_computes, action)
                 cum_reward += reward
 
                 # Trade performance tracking
@@ -792,7 +807,7 @@ class DRLAgent:
                 if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
                     curr_pos = DRLAgent.IN_TRADE
                 elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL:
-                    curr_pos = DRLAgent.IN_TRADE
+                    curr_pos = DRLAgent.OUT_TRADE
                 else:
                     curr_pos = prev_pos
                 
