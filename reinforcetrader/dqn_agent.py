@@ -336,7 +336,7 @@ class DRLAgent:
     def _DSR(self, Rt, A_tm1, B_tm1, eps: float = np.finfo(float).eps) -> float:
         # Compute delta values
         dAt = Rt - A_tm1
-        dBt = Rt*Rt - B_tm1
+        dBt = Rt ** 2 - B_tm1
 
         num = B_tm1 * dAt - 0.5 * A_tm1 * dBt
         denom = (B_tm1 - A_tm1 ** 2) ** 1.5 + eps
@@ -388,7 +388,7 @@ class DRLAgent:
                 pass
         return self._get_reward_state_computes()
 
-    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any]) -> dict[str, Any]:
+    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any], reward_diag: bool=False) -> dict[str, Any]:
         # Make req. directories if not exist
         os.makedirs(train_config['model_dir'], exist_ok=True)
         os.makedirs(train_config['plots_dir'], exist_ok=True)
@@ -411,22 +411,28 @@ class DRLAgent:
             env_steps = 0
             # store the current value of epsilon for boosting
             epsilon_start = self._epsilon
+                    
+            # Define parameters for episode-ticker iteration
+            L = state_loader.get_episode_len('train', e)
+            t0 = self._window_size - 1
+            
+            # Initialize container to store received rewards
+            if reward_diag:
+                episode_rewards = np.zeros((len(all_tickers), L - t0 - 1))
             
             # Iterate tickers, training sequentially
-            L = state_loader.get_episode_len('train', e)
-            for ticker in tqdm(all_tickers, desc=f'Training episode {e}', ncols=100):
-                # Train on this ticker for the episode (standard rollout with replay)
-                t0 = self._window_size - 1
+            for ti, ticker in enumerate(tqdm(all_tickers, desc=f'Training episode {e}', ncols=100)):
+
                 state = state_loader.get_state_matrix('train', e, ticker, t0, self._window_size)
                 prev_pos = DRLAgent.OUT_TRADE
                 
                 # Initalize the reward computes for the ticker
                 self._init_reward_state_computes()
-
+                    
                 for t in range(t0, L - 1):
                     # Get the reward computes that are included in the state representation
                     reward_computes = self._get_reward_state_computes()
-                    # Store the current extra features (ef) for exp. replay
+                    # Store the current extra features (ef) used in state rep.
                     curr_ef = list(reward_computes.values())
                     
                     # Derive action based on eps-greedy policy
@@ -440,17 +446,21 @@ class DRLAgent:
                         curr_pos = DRLAgent.IN_TRADE
                     elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL:
                         curr_pos = DRLAgent.IN_TRADE
+                    else:
+                        curr_pos = prev_pos
                     
                     # Append the return value for reward calculation
                     if curr_pos == DRLAgent.IN_TRADE:
-                        Rt = state_loader.get_reward_computes('train', e, ticker, t)['Rt']
+                        Rt = state_loader.get_reward_computes('train', e, ticker, t)['1DFRet']
                     else:
                         Rt = 0
                         
                     reward_computes['Rt'] = Rt
                     
-                    # Compute the reward value for the state-action pair
+                    # Compute and store the reward value for the state-action pair
                     reward = self._compute_reward(reward_computes)
+                    if reward_diag:
+                        episode_rewards[ti, t - t0] = reward
 
                     # Get the next state
                     next_state = state_loader.get_state_matrix('train', e, ticker, t + 1, self._window_size)
@@ -479,12 +489,16 @@ class DRLAgent:
                     state = next_state
                     prev_pos = curr_pos
 
+            # Plot reward diagostics
+            if reward_diag:
+                self._visualize_rewards(episode_rewards, f'Epsiode {e} Reward Visualization')
+            
             # Run validation on this episode's validation set
             val_result = self._run_validation(state_loader, e, all_tickers)
             
             # Print the validation summary
             print(f'Episode {e} validation summary:')
-            print(f"Train loss: {train_loss:.4f}, Cum. Sum Reward: {val_result['cum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
+            print(f"Train loss: {train_loss:.4f}, Cum. Reward: {val_result['cum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
             print(f"Trade Duration: {val_result['trade_duration']:.2f}, Total PnL: {val_result['total_pnl']:.2f}, Profit Factor: {val_result['profit_factor']:.3f}")
             print(f"Force End Trade Count: {val_result['force_end_trades']}, Force End PnL: {val_result['force_end_pnl']:.2f}")
             
@@ -523,7 +537,32 @@ class DRLAgent:
 
         return logs_by_episode
 
-
+    def _visualize_rewards(self, reward_data, plot_name: str):
+        # Create plot with two subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, gridspec_kw={'width_ratios': [1, 3]})
+        
+        # Left plot: Cumulative sum of reward (i.e, approximations of e.g., Sharpe ratio)
+        
+        num_tickers, num_steps = reward_data.shape
+        for ti in range(num_tickers):
+            ax1.plot(np.arange(num_steps), reward_data[ti, :])
+        ax1.set_title('Cumulative Sum of Rewards Per Ticker')
+        ax1.set_ylabel('Reward')
+        
+        # Right Plot: Distribution of the receieved rewards
+        reward_flat = reward_data.ravel()
+        ax2.hist(reward_flat, edgecolor='black', label='Histogram')
+        ax2.axvline(x=np.mean(reward_flat), linestyle='--', label='Mean')
+        ax2.axvline(x=np.median(reward_flat), linestyle=':', label='Median')
+        ax2.legend()
+        ax2.set_title('Reward Distribution')
+        ax2.set_ylabel('Frequency')
+        
+        plt.show()
+        
+        
+        
+    
     def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]) -> dict[str, int | float]:
         # The agent does no exploration, only exploitation
         # Define metrics to track for validation cycle
@@ -545,7 +584,7 @@ class DRLAgent:
         for ticker in tickers:
             t0 = self._window_size - 1
             state = state_loader.get_state_matrix('validate', episode_id, ticker, t0, self._window_size)
-            prev_pos = 0
+            prev_pos = DRLAgent.OUT_TRADE
             entry_price = None
 
             # Initalize the reward computes for the ticker
@@ -566,10 +605,12 @@ class DRLAgent:
                     curr_pos = DRLAgent.IN_TRADE
                 elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL:
                     curr_pos = DRLAgent.IN_TRADE
+                else:
+                    curr_pos = prev_pos
                 
                 # Append the return value for reward calculation
                 if curr_pos == DRLAgent.IN_TRADE:
-                    Rt = state_loader.get_reward_computes('validate', episode_id, ticker, t)['Rt']
+                    Rt = state_loader.get_reward_computes('validate', episode_id, ticker, t)['1DFRet']
                 else:
                     Rt = 0
                 
@@ -611,6 +652,9 @@ class DRLAgent:
                     entry_price = None
 
                 next_state = state_loader.get_state_matrix('validate', episode_id, ticker, t + 1, self._window_size)
+                
+                # Update the reward computes for the next iteration
+                self._update_reward_computes(Rt)
                 
                 # Advance to the next state
                 state =  next_state
@@ -696,17 +740,16 @@ class DRLAgent:
             plt.close()
 
     def _action_to_onehot(self, a: int) -> dict:
-        # 0: buy, 1: hold-out, 2: sell, 3: hold-in
+        # A = {0: buy, 1: hold, 2: sell}
         return {
-            'buy':  1 if a == 0 else 0,
-            'hold-out':  1 if a == 1 else 0,
-            'sell': 1 if a == 2 else 0,
-            'hold-in': 1 if a == 3 else 0,
+            'buy':  1 if a == DRLAgent.A_BUY else 0,
+            'hold':  1 if a == DRLAgent.A_HOLD else 0,
+            'sell': 1 if a == DRLAgent.A_SELL else 0,
         }
 
     def test(self, state_loader: EpisodeStateLoader, episode_id: int, test_config: dict[str, Any]):
         # NOTE: Assumes no exploration and only exploitation
-        tickers_all = state_loader.get_all_tickers()
+        all_tickers = state_loader.get_all_tickers()
 
         # Keep a single ordered list of tickers and parallel lists of series for safe alignment
         col_keys = [] # ['AAPL', 'MSFT', ...] in deterministic order
@@ -718,54 +761,55 @@ class DRLAgent:
         # Get the index for the signals and prices dataframes
         df_idx = state_loader.get_test_dates(episode_id)
         
-        for ticker in tqdm(tickers_all, desc=f'Testing episode {episode_id}', ncols=100):
-            # Prepare iteration
-            t0 = self._window_size - 1
+        for ticker in tqdm(all_tickers, desc=f'Testing episode {episode_id}', ncols=100):
+            # Prepare for the first iteration
+            # NOTE: t0 can be init to 0 instead of window size - 1 because
+            # of pad_overflow functionality in get_state_matrix
+            t0 = 0
             state = state_loader.get_state_matrix('test', episode_id, ticker, t0, self._window_size)
-            prev_pos = 0
+            prev_pos = DRLAgent.OUT_TRADE
 
-            # allocate containers (length L to match idx)
+            # Allocate containers (length L to match idx)
             sig_cells = [None] * L
             close_px  = np.empty(L, dtype=np.float32)
 
-            # warm-up rows: As state is not available, set signals and close to NaN
-            for t in range(0, t0):
-                close_px[t] = np.nan
-                sig_cells[t] = np.nan # type: ignore
-
             # main test loop
             for t in range(t0, L - 1):
+                # Get the reward computes that are included in the state representation
+                reward_computes = self._get_reward_state_computes()
+                # Store the current extra features (ef) for deciding action
+                curr_ef = list(reward_computes.values())
+                
+                # Get the current close price
                 curr_close = state_loader.get_state_OHLCV('test', episode_id, ticker, t)['Close']
                 close_px[t] = curr_close
 
-                action = self._act(state, prev_pos, training=False)
+                # Derive action based on greedy policy
+                action = self._act(state, prev_pos, curr_ef, training=False)
                 sig_cells[t] = self._action_to_onehot(action) # type: ignore
 
-                # Compute whether in trade or out of trade for next step
-                if prev_pos == 0 and action == 0:
-                    # buy signal was given when out of trade
-                    pos_t = 1
-                elif prev_pos == 1 and action == 2:
-                    # sell signal was given when in trade
-                    pos_t = 0
+                # Compute the current trade position based on new action
+                if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
+                    curr_pos = DRLAgent.IN_TRADE
+                elif prev_pos == DRLAgent.IN_TRADE and action == DRLAgent.A_SELL:
+                    curr_pos = DRLAgent.IN_TRADE
                 else:
-                    # keep the previous position
-                    pos_t = prev_pos
+                    curr_pos = prev_pos
                 
                 # Advance to the next state and update prev_pos
                 next_state = state_loader.get_state_matrix('test', episode_id, ticker, t + 1, self._window_size)
                 state = next_state
-                prev_pos = pos_t
+                prev_pos = curr_pos
 
-            # final row (t = L-1): record price; no new decision possible so force hold-out or sell
+            # Final row (t = L-1): record price; no new decision possible so force hold-out or sell
             close_px[L - 1] = state_loader.get_state_OHLCV('test', episode_id, ticker, L - 1)['Close']
             if sig_cells[L - 1] is None:
-                if prev_pos == 0:
-                    # out of trade -> hold-out
-                    sig_cells[L - 1] = self._action_to_onehot(1) # type: ignore
+                if prev_pos == DRLAgent.OUT_TRADE:
+                    # Hold from taking a trade
+                    sig_cells[L - 1] = self._action_to_onehot(DRLAgent.A_HOLD) # type: ignore
                 else:
-                    # in trade -> sell
-                    sig_cells[L - 1] = self._action_to_onehot(2) # type: ignore
+                    # Close the trade
+                    sig_cells[L - 1] = self._action_to_onehot(DRLAgent.A_SELL) # type: ignore
 
             # Stash in ordered lists
             col_keys.append(ticker)
