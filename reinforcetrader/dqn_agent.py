@@ -299,7 +299,7 @@ class DRLAgent:
         targets = tf.tensor_scatter_nd_update(q_current, target_actions, returns)
 
         loss = self._model.train_on_batch(curr_state, targets)
-        self._update_target_network(tau=0.005)
+        self._update_target_network(tau=0.001)
 
         return float(loss)
 
@@ -379,7 +379,9 @@ class DRLAgent:
     def _init_reward_params(self, Rts: list[float], n: float=1e-1) -> float | None:
         # Rts: List of returns to have a hot start for moments.
         # This is necessary for value stabilization
-        # Helper method to init/reset the compute values
+        # Returns any values needed for computing cum. reward and more..
+        R0 = None
+        
         match self.reward_type:
             case 'DSR':
                 self._r_eta = n
@@ -388,8 +390,8 @@ class DRLAgent:
                 for rt in Rts:
                     self._r_A_tm1 += n * (rt - self._r_A_tm1)
                     self._r_B_tm1 += n * (rt ** 2 - self._r_B_tm1)
-                    S0 = self._r_A_tm1 / ((self._r_B_tm1 - self._r_A_tm1 ** 2) ** 0.5)
-                    return S0
+                    # Compute the initial sharpe ratio. Doesn't account transaction cost
+                R0 = self._r_A_tm1 / ((self._r_B_tm1 - self._r_A_tm1 ** 2) ** 0.5)
             case 'DDDR':
                 self._r_eta = n
                 self._r_A_tm1 = 0
@@ -397,10 +399,10 @@ class DRLAgent:
                 for rt in Rts:
                     self._r_A_tm1 += n * (rt - self._r_A_tm1)
                     self._r_DD2_tm1 += n * (min(rt, 0) ** 2 - self._r_DD2_tm1)
-                    DDR0 = self._r_A_tm1 / (self._r_DD2_tm1 ** 0.5)
-                    return DDR0
-            case _:
-                return None
+                    # Compute the initial downside deviation ratio. Doesn't account transaction cost
+                R0 = self._r_A_tm1 / (self._r_DD2_tm1 ** 0.5)
+            
+        return R0
         
     def _get_reward_computes(self) -> dict[str, float]:
         match self.reward_type:
@@ -531,7 +533,7 @@ class DRLAgent:
                     prev_pos = curr_pos
 
             # Plot reward diagostics
-            self._visualize_rewards(episode_reward_reqs, episode_rewards, f'Epsiode {e} Reward Visualization')
+            self._visualize_rewards(episode_reward_reqs, episode_rewards, f'Epsiode {e}: Reward Visualization')
             
             # Run validation on this episode's validation set
             val_result = self._run_validation(state_loader, e, all_tickers)
@@ -579,15 +581,22 @@ class DRLAgent:
 
     def _visualize_rewards(self, reward_reqs, reward_data, plot_name: str):
         # Reward reqs are used by some reward function to compute cumulative reward
-        # TODO: Add support for all reward function types
         # Create plot with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={'width_ratios': [2, 1]})
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4), gridspec_kw={'width_ratios': [2, 1]})
+        fig.suptitle(plot_name, fontsize=12)
         
         # Left plot: Cumulative sum of reward (i.e, approximations of e.g., Sharpe ratio)
         
         num_tickers, num_steps = reward_data.shape
         for ti in range(num_tickers):
-            cum_reward = reward_reqs[ti] + (self._r_eta * np.cumsum(reward_data[ti, :]))
+            if self.reward_type in {'DSR', 'DDDR'}:
+                # Compute the actual sharpe ratio at time t. Thus, an increasing cumulative reward
+                # suggests that Sharpe or Sortino is increasing, or maintained at high level
+                # Formula_t: (S0 or DDR0) + n * sum D_t
+                cum_reward = reward_reqs[ti] + (self._r_eta * np.cumsum(reward_data[ti, :]))
+            elif self.reward_type in {'PNL'}:
+                # Assumes the rewards are non-log returns
+                cum_reward = np.exp(np.cumsum(reward_data[ti, :]))
             ax1.plot(np.arange(num_steps), cum_reward)
         ax1.set_title('Cumulative Sum of Rewards Per Ticker')
         ax1.set_xlabel('Time steps')
@@ -595,15 +604,33 @@ class DRLAgent:
         
         # Right Plot: Distribution of the receieved rewards
         reward_flat = reward_data.ravel()
-        ax2.hist(reward_flat, edgecolor='black', label='Histogram')
-        ax2.axvline(x=np.mean(reward_flat), linestyle='--', label='Mean')
-        ax2.axvline(x=np.median(reward_flat), linestyle=':', label='Median')
+        
+        # IQR-based clipping to avoid outliers in histogram, mean, median
+        Q1 = np.percentile(reward_flat, 25)
+        Q3 = np.percentile(reward_flat, 75)
+        IQR = Q3 - Q1
+        if IQR > 0:
+            low = Q1 - 1.5 * IQR
+            high = Q3 + 1.5 * IQR
+            mask = (reward_flat >= low) & (reward_flat <= high)
+            reward_clipped = reward_flat[mask]
+        else:
+            reward_clipped = reward_flat
+        
+        mean_reward = np.mean(reward_clipped)
+        median_reward = np.median(reward_clipped)
+        
+        ax2.hist(reward_clipped, bins=30, edgecolor='black', label='Histogram')
+        ax2.axvline(x=mean_reward, linestyle='--', label=f'Mean (={mean_reward:.2f})')
+        ax2.axvline(x=median_reward, linestyle=':', label=f'Median (={median_reward:.2f})')
         ax2.legend()
         ax2.set_title('Reward Distribution')
-        ax1.set_xlabel('Reward')
+        ax2.set_xlabel('Reward')
         ax2.set_ylabel('Frequency')
         
+        plt.tight_layout()
         plt.show()
+
     
     def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]) -> dict[str, int | float]:
         # The agent does no exploration, only exploitation
