@@ -376,12 +376,25 @@ class DRLAgent:
                 
         return num / denom
     
-    def _init_reward_state_computes(self):
+    def _init_reward_state_computes(self, Rts: list[float], n: float=1e-1):
+        # Rts: List of returns to have a hot start for moments
         # Helper method to init/reset the compute values
-        self._r_A_tm1 = 0
-        self._r_B_tm1 = 0
-        self._r_DD2_tm1 = 0
-    
+        match self.reward_type:
+            case 'DSR':
+                self._r_A_tm1 = 0
+                self._r_B_tm1 = 0
+                for rt in Rts:
+                    self._r_A_tm1 += n * (rt - self._r_A_tm1)
+                    self._r_B_tm1 += n * (rt ** 2 - self._r_B_tm1)
+            case 'DDDR':
+                self._r_A_tm1 = 0
+                self._r_DD2_tm1 = 0
+                for rt in Rts:
+                    self._r_A_tm1 += n * (rt - self._r_A_tm1)
+                    self._r_DD2_tm1 += n * (min(rt, 0) ** 2 - self._r_DD2_tm1)
+            case _:
+                pass
+        
     def _get_reward_state_computes(self) -> dict[str, float]:
         match self.reward_type:
             case 'DSR':
@@ -391,7 +404,7 @@ class DRLAgent:
             case _:
                 return {}
     
-    def _update_reward_computes(self, Rt, n: float=1e-4) -> dict[str, float]:
+    def _update_reward_computes(self, Rt, n: float=1e-1) -> dict[str, float]:
         match self.reward_type:
             case 'DSR':
                 self._r_A_tm1 += n * (Rt - self._r_A_tm1)
@@ -442,7 +455,10 @@ class DRLAgent:
                 prev_pos = DRLAgent.OUT_TRADE
                 
                 # Initalize the reward computes for the ticker
-                self._init_reward_state_computes()
+                # NOTE: Some reward functions (like DSR, DDDR require) need
+                # a non-zero inital values of moments (i.e, a hot start)
+                Rts = [state_loader.get_reward_computes('train', e, ticker, i)['1DFRet'] for i in range(t0)]
+                self._init_reward_state_computes(Rts)
                     
                 for t in range(t0, L - 1):
                     # Get the reward computes that are included in the state representation
@@ -554,7 +570,7 @@ class DRLAgent:
 
     def _visualize_rewards(self, reward_data, plot_name: str):
         # Create plot with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, gridspec_kw={'width_ratios': [1, 3]})
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={'width_ratios': [2, 1]})
         
         # Left plot: Cumulative sum of reward (i.e, approximations of e.g., Sharpe ratio)
         
@@ -562,6 +578,7 @@ class DRLAgent:
         for ti in range(num_tickers):
             ax1.plot(np.arange(num_steps), reward_data[ti, :])
         ax1.set_title('Cumulative Sum of Rewards Per Ticker')
+        ax1.set_xlabel('Time steps')
         ax1.set_ylabel('Reward')
         
         # Right Plot: Distribution of the receieved rewards
@@ -571,12 +588,10 @@ class DRLAgent:
         ax2.axvline(x=np.median(reward_flat), linestyle=':', label='Median')
         ax2.legend()
         ax2.set_title('Reward Distribution')
+        ax1.set_ylabel('Reward')
         ax2.set_ylabel('Frequency')
         
         plt.show()
-        
-        
-        
     
     def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]) -> dict[str, int | float]:
         # The agent does no exploration, only exploitation
@@ -603,7 +618,10 @@ class DRLAgent:
             entry_price = None
 
             # Initalize the reward computes for the ticker
-            self._init_reward_state_computes()
+            # NOTE: Some reward functions (like DSR, DDDR require) need
+            # a non-zero inital values of moments (i.e, a hot start)
+            Rts = [state_loader.get_reward_computes('train', episode_id, ticker, i)['1DFRet'] for i in range(t0)]
+            self._init_reward_state_computes(Rts)
             
             for t in range(t0, L - 1):
                 # Get the reward computes that are included in the state representation
