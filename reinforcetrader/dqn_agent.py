@@ -376,26 +376,33 @@ class DRLAgent:
                 
         return num / denom
     
-    def _init_reward_state_computes(self, Rts: list[float], n: float=1e-1):
-        # Rts: List of returns to have a hot start for moments
+    def _init_reward_params(self, Rts: list[float], n: float=1e-1) -> float | None:
+        # Rts: List of returns to have a hot start for moments.
+        # This is necessary for value stabilization
         # Helper method to init/reset the compute values
         match self.reward_type:
             case 'DSR':
+                self._r_eta = n
                 self._r_A_tm1 = 0
                 self._r_B_tm1 = 0
                 for rt in Rts:
                     self._r_A_tm1 += n * (rt - self._r_A_tm1)
                     self._r_B_tm1 += n * (rt ** 2 - self._r_B_tm1)
+                    S0 = self._r_A_tm1 / ((self._r_B_tm1 - self._r_A_tm1 ** 2) ** 0.5)
+                    return S0
             case 'DDDR':
+                self._r_eta = n
                 self._r_A_tm1 = 0
                 self._r_DD2_tm1 = 0
                 for rt in Rts:
                     self._r_A_tm1 += n * (rt - self._r_A_tm1)
                     self._r_DD2_tm1 += n * (min(rt, 0) ** 2 - self._r_DD2_tm1)
+                    DDR0 = self._r_A_tm1 / (self._r_DD2_tm1 ** 0.5)
+                    return DDR0
             case _:
-                pass
+                return None
         
-    def _get_reward_state_computes(self) -> dict[str, float]:
+    def _get_reward_computes(self) -> dict[str, float]:
         match self.reward_type:
             case 'DSR':
                 return {'A_tm1': self._r_A_tm1, 'B_tm1': self._r_B_tm1}
@@ -404,19 +411,19 @@ class DRLAgent:
             case _:
                 return {}
     
-    def _update_reward_computes(self, Rt, n: float=1e-1) -> dict[str, float]:
+    def _update_reward_computes(self, Rt) -> dict[str, float]:
         match self.reward_type:
             case 'DSR':
-                self._r_A_tm1 += n * (Rt - self._r_A_tm1)
-                self._r_B_tm1 += n * (Rt ** 2 - self._r_B_tm1)
+                self._r_A_tm1 += self._r_eta * (Rt - self._r_A_tm1)
+                self._r_B_tm1 += self._r_eta * (Rt ** 2 - self._r_B_tm1)
             case 'DDDR':
-                self._r_A_tm1 += n * (Rt - self._r_A_tm1)
-                self._r_DD2_tm1 += n * (min(Rt, 0) ** 2 - self._r_DD2_tm1)
-            case 'PNL':
+                self._r_A_tm1 += self._r_eta * (Rt - self._r_A_tm1)
+                self._r_DD2_tm1 += self._r_eta * (min(Rt, 0) ** 2 - self._r_DD2_tm1)
+            case _:
                 pass
-        return self._get_reward_state_computes()
+        return self._get_reward_computes()
 
-    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any], reward_diag: bool=False) -> dict[str, Any]:
+    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any]) -> dict[str, Any]:
         # Make req. directories if not exist
         os.makedirs(train_config['model_dir'], exist_ok=True)
         os.makedirs(train_config['plots_dir'], exist_ok=True)
@@ -445,8 +452,11 @@ class DRLAgent:
             t0 = self._window_size - 1
             
             # Initialize container to store received rewards
-            if reward_diag:
-                episode_rewards = np.zeros((len(all_tickers), L - t0 - 1))
+            # episode_reward_reqs are values that are used for visualization purposes
+            # see _visualize_rewards()
+            episode_reward_reqs = np.zeros(len(all_tickers))
+            # Store the reward values per time step per ticker
+            episode_rewards = np.zeros((len(all_tickers), L - t0 - 1))
             
             # Iterate tickers, training sequentially
             for ti, ticker in enumerate(tqdm(all_tickers, desc=f'Training episode {e}', ncols=100)):
@@ -458,11 +468,12 @@ class DRLAgent:
                 # NOTE: Some reward functions (like DSR, DDDR require) need
                 # a non-zero inital values of moments (i.e, a hot start)
                 Rts = [state_loader.get_reward_computes('train', e, ticker, i)['1DFRet'] for i in range(t0)]
-                self._init_reward_state_computes(Rts)
+                R0 = self._init_reward_params(Rts)
+                episode_reward_reqs[ti] = R0
                     
                 for t in range(t0, L - 1):
                     # Get the reward computes that are included in the state representation
-                    reward_computes = self._get_reward_state_computes()
+                    reward_computes = self._get_reward_computes()
                     # Store the current extra features (ef) used in state rep.
                     curr_ef = list(reward_computes.values())
                     
@@ -490,8 +501,7 @@ class DRLAgent:
                     
                     # Compute and store the reward value for the state-action pair
                     reward = self._compute_reward(reward_computes, action)
-                    if reward_diag:
-                        episode_rewards[ti, t - t0] = reward
+                    episode_rewards[ti, t - t0] = reward
 
                     # Get the next state
                     next_state = state_loader.get_state_matrix('train', e, ticker, t + 1, self._window_size)
@@ -521,8 +531,7 @@ class DRLAgent:
                     prev_pos = curr_pos
 
             # Plot reward diagostics
-            if reward_diag:
-                self._visualize_rewards(episode_rewards, f'Epsiode {e} Reward Visualization')
+            self._visualize_rewards(episode_reward_reqs, episode_rewards, f'Epsiode {e} Reward Visualization')
             
             # Run validation on this episode's validation set
             val_result = self._run_validation(state_loader, e, all_tickers)
@@ -568,7 +577,9 @@ class DRLAgent:
 
         return logs_by_episode
 
-    def _visualize_rewards(self, reward_data, plot_name: str):
+    def _visualize_rewards(self, reward_reqs, reward_data, plot_name: str):
+        # Reward reqs are used by some reward function to compute cumulative reward
+        # TODO: Add support for all reward function types
         # Create plot with two subplots
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={'width_ratios': [2, 1]})
         
@@ -576,7 +587,8 @@ class DRLAgent:
         
         num_tickers, num_steps = reward_data.shape
         for ti in range(num_tickers):
-            ax1.plot(np.arange(num_steps), reward_data[ti, :])
+            cum_reward = reward_reqs[ti] + (self._r_eta * np.cumsum(reward_data[ti, :]))
+            ax1.plot(np.arange(num_steps), cum_reward)
         ax1.set_title('Cumulative Sum of Rewards Per Ticker')
         ax1.set_xlabel('Time steps')
         ax1.set_ylabel('Reward')
@@ -588,7 +600,7 @@ class DRLAgent:
         ax2.axvline(x=np.median(reward_flat), linestyle=':', label='Median')
         ax2.legend()
         ax2.set_title('Reward Distribution')
-        ax1.set_ylabel('Reward')
+        ax1.set_xlabel('Reward')
         ax2.set_ylabel('Frequency')
         
         plt.show()
@@ -621,11 +633,11 @@ class DRLAgent:
             # NOTE: Some reward functions (like DSR, DDDR require) need
             # a non-zero inital values of moments (i.e, a hot start)
             Rts = [state_loader.get_reward_computes('train', episode_id, ticker, i)['1DFRet'] for i in range(t0)]
-            self._init_reward_state_computes(Rts)
+            self._init_reward_params(Rts)
             
             for t in range(t0, L - 1):
                 # Get the reward computes that are included in the state representation
-                reward_computes = self._get_reward_state_computes()
+                reward_computes = self._get_reward_computes()
                 # Store the current extra features (ef) for deciding action
                 curr_ef = list(reward_computes.values())
                 
@@ -809,7 +821,7 @@ class DRLAgent:
             # main test loop
             for t in range(t0, L - 1):
                 # Get the reward computes that are included in the state representation
-                reward_computes = self._get_reward_state_computes()
+                reward_computes = self._get_reward_computes()
                 # Store the current extra features (ef) for deciding action
                 curr_ef = list(reward_computes.values())
                 
