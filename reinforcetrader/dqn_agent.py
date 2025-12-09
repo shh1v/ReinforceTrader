@@ -66,7 +66,7 @@ class DualBranchDQN(keras.Model):
         
         model_input = {'motif_input': motif_input, 'context_input': context_input}
         self._model = keras.Model(inputs=model_input, outputs=Q, name='DualBranchDQN')
-        self._model.compile(loss='mse', optimizer=optimizers.Adam(learning_rate, clipnorm=1.0))
+        self._model.compile(loss=keras.losses.Huber(), optimizer=optimizers.Adam(learning_rate, clipnorm=0.5))
 
     def get_model(self):
         return self._model
