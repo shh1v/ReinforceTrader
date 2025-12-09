@@ -9,6 +9,7 @@ import numpy as np
 from datetime import datetime
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 import tensorflow as tf
 from tensorflow import keras
@@ -302,7 +303,7 @@ class DRLAgent:
         self._update_target_network(tau=0.001)
 
         return float(loss)
-
+    
     def _reward_param_keys(self, reward_type: str) -> set[str]:
         # Small Helper method. Uff..
         match reward_type:
@@ -376,7 +377,7 @@ class DRLAgent:
                 
         return num / denom
     
-    def _init_reward_params(self, Rts: list[float], n: float=1e-1) -> float | None:
+    def _init_reward_params(self, Rts: list[float], n: float=1e-4) -> float | None:
         # Rts: List of returns to have a hot start for moments.
         # This is necessary for value stabilization
         # Returns any values needed for computing cum. reward and more..
@@ -494,11 +495,8 @@ class DRLAgent:
                         curr_pos = prev_pos
                     
                     # Append the return value for reward calculation
-                    if curr_pos == DRLAgent.IN_TRADE:
-                        Rt = state_loader.get_reward_computes('train', e, ticker, t)['1DFRet']
-                    else:
-                        Rt = 0
-                        
+                    fRt = state_loader.get_reward_computes('train', e, ticker, t)['1DFRet']
+                    Rt = fRt if curr_pos == DRLAgent.IN_TRADE else 0
                     reward_computes['Rt'] = Rt
                     
                     # Compute and store the reward value for the state-action pair
@@ -533,7 +531,7 @@ class DRLAgent:
                     prev_pos = curr_pos
 
             # Plot reward diagostics
-            self._visualize_rewards(episode_reward_reqs, episode_rewards, f'Epsiode {e}: Reward Visualization')
+            self._plot_rewards(episode_reward_reqs, episode_rewards, f'Epsiode {e}: Reward Visualization')
             
             # Run validation on this episode's validation set
             val_result = self._run_validation(state_loader, e, all_tickers)
@@ -579,54 +577,76 @@ class DRLAgent:
 
         return logs_by_episode
 
-    def _visualize_rewards(self, reward_reqs, reward_data, plot_name: str):
+    def _plot_rewards(self, reward_reqs, reward_data, plot_name: str, remove_outliers: bool=False) -> None:
         # Reward reqs are used by some reward function to compute cumulative reward
         # Create plot with two subplots
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4), gridspec_kw={'width_ratios': [2, 1]})
         fig.suptitle(plot_name, fontsize=12)
         
         # Left plot: Cumulative sum of reward (i.e, approximations of e.g., Sharpe ratio)
+        # First compute the cumulative rewards based on the reward type
+        if self.reward_type in {'DSR', 'DDDR'}:
+            # Formula: S_t = S_0 + eta * Sum(D_t)
+            # We reshape reward_reqs to (N, 1) to broadcast across time axis
+            cum_sums = np.cumsum(reward_data, axis=1)
+            all_cum_rewards = reward_reqs[:, np.newaxis] + (self._r_eta * cum_sums)
+        elif self.reward_type in {'PNL'}:
+            # Formula: exp(Sum(log_returns))
+            all_cum_rewards = np.exp(np.cumsum(reward_data, axis=1))
+        else:
+            # Fallback for raw summation if other types added later
+            all_cum_rewards = np.cumsum(reward_data, axis=1)
+        y_label = 'Cumulative Reward {self.reward_type}'
         
-        num_tickers, num_steps = reward_data.shape
-        for ti in range(num_tickers):
-            if self.reward_type in {'DSR', 'DDDR'}:
-                # Compute the actual sharpe ratio at time t. Thus, an increasing cumulative reward
-                # suggests that Sharpe or Sortino is increasing, or maintained at high level
-                # Formula_t: (S0 or DDR0) + n * sum D_t
-                cum_reward = reward_reqs[ti] + (self._r_eta * np.cumsum(reward_data[ti, :]))
-            elif self.reward_type in {'PNL'}:
-                # Assumes the rewards are non-log returns
-                cum_reward = np.exp(np.cumsum(reward_data[ti, :]))
-            ax1.plot(np.arange(num_steps), cum_reward)
-        ax1.set_title('Cumulative Sum of Rewards Per Ticker')
+        # Compute Statistics across tickers (mean, std)
+        mean_r_traj = np.mean(all_cum_rewards, axis=0)
+        std_r_traj = np.std(all_cum_rewards, axis=0)
+        
+        # Plot the Mean Line and shaded standard deviation
+        time_steps = np.arange(reward_data.shape[1])
+        ax1.plot(time_steps, mean_r_traj, color='#1f77b4', linewidth=2, label='Mean Performance')
+        ax1.fill_between(time_steps, mean_r_traj - std_r_traj, mean_r_traj + std_r_traj, color='#1f77b4', alpha=0.2, label='±1 Std. Dev.')
+
+        ax1.set_title('Overall Cumulative Reward Growth')
         ax1.set_xlabel('Time steps')
-        ax1.set_ylabel('Reward')
+        ax1.set_ylabel(y_label)
+        ax1.grid(True, linestyle='--', alpha=0.3)
+        ax1.legend(loc='upper left')
+
+        ax1.set_title('Adj. Cum. Sum of Rewards Per Ticker')
+        ax1.set_xlabel('Time steps')
+        ax1.set_ylabel('Cum. Reward')
         
         # Right Plot: Distribution of the receieved rewards
-        reward_flat = reward_data.ravel()
+        rewards_flat = reward_data.ravel()
         
         # IQR-based clipping to avoid outliers in histogram, mean, median
-        Q1 = np.percentile(reward_flat, 25)
-        Q3 = np.percentile(reward_flat, 75)
+        Q1 = np.percentile(rewards_flat, 25)
+        Q3 = np.percentile(rewards_flat, 75)
         IQR = Q3 - Q1
-        if IQR > 0:
+        if remove_outliers and IQR > 0:
             low = Q1 - 1.5 * IQR
             high = Q3 + 1.5 * IQR
-            mask = (reward_flat >= low) & (reward_flat <= high)
-            reward_clipped = reward_flat[mask]
+            rewards_hist = rewards_flat[(rewards_flat >= low) & (rewards_flat <= high)]
+            print(f'Removed {len(rewards_flat) - len(rewards_hist)} outliers from histogram.')
         else:
-            reward_clipped = reward_flat
+            rewards_hist = rewards_flat
         
-        mean_reward = np.mean(reward_clipped)
-        median_reward = np.median(reward_clipped)
+        mean_reward = np.mean(rewards_hist)
+        median_reward = np.median(rewards_hist)
         
-        ax2.hist(reward_clipped, bins=30, edgecolor='black', label='Histogram')
-        ax2.axvline(x=mean_reward, linestyle='--', label=f'Mean (={mean_reward:.2f})')
-        ax2.axvline(x=median_reward, linestyle=':', label=f'Median (={median_reward:.2f})')
+        # Histogram without outliers
+        ax2.hist(rewards_hist, bins=30, alpha=0.6, edgecolor='black', label='Hist.', density=True)
+        # Include a KDE line
+        sns.kdeplot(rewards_hist, ax=ax2, label='KDE', color='orange')
+        # Lines to show mean and the median
+        ax2.axvline(x=mean_reward, linestyle='--', label=f'μ (={mean_reward:.2f})')
+        ax2.axvline(x=median_reward, linestyle=':', label=f'Med. (={median_reward:.2f})')
+        
         ax2.legend()
-        ax2.set_title('Reward Distribution')
+        ax2.set_title('Reward Distribution' + (' (No Outliers)' if remove_outliers else ''))
         ax2.set_xlabel('Reward')
-        ax2.set_ylabel('Frequency')
+        ax2.set_ylabel('Density')
         
         plt.tight_layout()
         plt.show()
