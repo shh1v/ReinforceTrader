@@ -8,10 +8,19 @@ from pandas.tseries.offsets import DateOffset
 
 from ..data_pipeline import RawDataLoader
 
-class PortfolioBackTester:
+class BackTester:
+    # Define constants for in-trade and out-of-trade positions
+    OUT_TRADE = 0
+    IN_TRADE = 1
+    
+    # Define constants that represent agent behaviour
+    A_BUY = 0
+    A_HOLD = 1
+    A_SELL = 2
     def __init__(self, signals: pd.DataFrame, prices: pd.DataFrame, benchmark_index: str='DJI') -> None:
         self._signals = signals 
         self._prices = prices
+        print(BackTester.OUT_TRADE)
         
         # Basic sanity checks
         if not self._signals.index.equals(self._prices.index):
@@ -71,9 +80,9 @@ class PortfolioBackTester:
                 
             row_pos = []
             for prev, sig in zip(daily_in_trades, signal_dicts):
-                if isinstance(sig, dict) and sig.get('buy', 0) == 1:
+                if isinstance(sig, dict) and sig.get('action', '') == 'buy':
                     row_pos.append(True)
-                elif isinstance(sig, dict) and sig.get('sell', 0) == 1:
+                elif isinstance(sig, dict) and sig.get('action', '') == 'sell':
                     row_pos.append(False)
                 else:  # hold-in or hold-out (or malformed cell)
                     row_pos.append(prev)

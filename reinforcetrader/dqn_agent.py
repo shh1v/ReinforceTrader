@@ -202,7 +202,7 @@ class DRLAgent:
         
         return q_values
     
-    def _act(self, state_matrix: np.ndarray, trade_pos: int, extra_features: list[float], training: bool=True) -> int:
+    def _act(self, state_matrix: np.ndarray, trade_pos: int, extra_features: list[float], training: bool=True) -> tuple[int, float | None]:
         if trade_pos not in {DRLAgent.IN_TRADE, DRLAgent.OUT_TRADE}:
             raise ValueError(f'Invalid trade position: {trade_pos}')
         
@@ -211,10 +211,10 @@ class DRLAgent:
         if training and np.random.random() < self._epsilon:
             if trade_pos == DRLAgent.OUT_TRADE:
                 # A_{Out of trade}: {0: buy, 1: hold (out)}
-                return np.random.randint(0, 1)
+                return (np.random.randint(0, 1), None)
             else:
                 # A_{In trade}: {1: hold (in), 2: sell}
-                return np.random.randint(1, 2)
+                return (np.random.randint(1, 2), None)
 
         # Pick action from DQN with probability 1 - epsilon
         # Dont use dropout as act() function is not used for gradient descent updates
@@ -225,8 +225,9 @@ class DRLAgent:
         # Compute Q values from DQN and restrict action space
         q_values = self._get_q_values(state_matrix, extra_context) + self._get_mask(trade_pos) # type: ignore
         action = int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
+        pred_q_value = float(q_values[0, action])
         
-        return action
+        return (action, pred_q_value)
 
     def _exp_replay(self, batch_size: int) -> float:
         if len(self._memory) < batch_size:
@@ -485,7 +486,7 @@ class DRLAgent:
                     # NOTE: Here, extra features are some computes that are used
                     # to compute the reward. To make a valid MDP, there variables
                     # are included in the state representation
-                    action = self._act(state, prev_pos, curr_ef)
+                    action, _ = self._act(state, prev_pos, curr_ef)
                     
                     # Compute the current trade position based on new action
                     if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
@@ -696,7 +697,7 @@ class DRLAgent:
                 curr_ef = list(reward_computes.values())
                 
                 # training=False turns off exploration
-                action = self._act(state, prev_pos, curr_ef, training=False)
+                action, _ = self._act(state, prev_pos, curr_ef, training=False)
                 curr_price = state_loader.get_state_OHLCV('validate', episode_id, ticker, t)['Close']
                 
                 # Compute the current trade position based on new action
@@ -838,13 +839,15 @@ class DRLAgent:
         else:
             plt.close()
 
-    def _action_to_onehot(self, a: int) -> dict:
+    def _get_predict_dict(self, a: int, q: float) -> dict:
         # A = {0: buy, 1: hold, 2: sell}
-        return {
-            'buy':  1 if a == DRLAgent.A_BUY else 0,
-            'hold':  1 if a == DRLAgent.A_HOLD else 0,
-            'sell': 1 if a == DRLAgent.A_SELL else 0,
+        action_map = {
+            DRLAgent.A_BUY: 'buy',
+            DRLAgent.A_HOLD: 'hold',
+            DRLAgent.A_SELL: 'sell'
         }
+        
+        return {'action': action_map[a], 'q_value': q}
 
     def test(self, state_loader: EpisodeStateLoader, episode_id: int, test_config: dict[str, Any]):
         # NOTE: Assumes no exploration and only exploitation
@@ -889,8 +892,8 @@ class DRLAgent:
                 close_px[t] = curr_close
 
                 # Derive action based on greedy policy
-                action = self._act(state, prev_pos, curr_ef, training=False)
-                sig_cells[t] = self._action_to_onehot(action) # type: ignore
+                action, q_value = self._act(state, prev_pos, curr_ef, training=False)
+                sig_cells[t] = self._get_predict_dict(action, q_value) # type: ignore
 
                 # Compute the current trade position based on new action
                 if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
@@ -915,10 +918,10 @@ class DRLAgent:
             if sig_cells[L - 1] is None:
                 if prev_pos == DRLAgent.OUT_TRADE:
                     # Hold from taking a trade
-                    sig_cells[L - 1] = self._action_to_onehot(DRLAgent.A_HOLD) # type: ignore
+                    sig_cells[L - 1] = self._get_predict_dict(DRLAgent.A_HOLD, 1.0) # type: ignore
                 else:
                     # Close the trade
-                    sig_cells[L - 1] = self._action_to_onehot(DRLAgent.A_SELL) # type: ignore
+                    sig_cells[L - 1] = self._get_predict_dict(DRLAgent.A_SELL, 1.0) # type: ignore
 
             # Stash in ordered lists
             col_keys.append(ticker)
