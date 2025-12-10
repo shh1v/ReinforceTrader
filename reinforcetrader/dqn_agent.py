@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 import tensorflow as tf
+from scipy import stats
 from tensorflow import keras
 from tensorflow.keras import layers, Input, optimizers
 import tensorflow.keras.ops as K
@@ -577,7 +578,7 @@ class DRLAgent:
 
         return logs_by_episode
 
-    def _plot_rewards(self, reward_reqs, reward_data, plot_name: str, remove_outliers: bool=False) -> None:
+    def _plot_rewards(self, reward_reqs, reward_data, plot_name: str, remove_outliers: bool=True) -> None:
         # Reward reqs are used by some reward function to compute cumulative reward
         # Create plot with two subplots
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4), gridspec_kw={'width_ratios': [2, 1]})
@@ -596,7 +597,7 @@ class DRLAgent:
         else:
             # Fallback for raw summation if other types added later
             all_cum_rewards = np.cumsum(reward_data, axis=1)
-        y_label = 'Cumulative Reward {self.reward_type}'
+        y_label = f'Cumulative Reward {self.reward_type}'
         
         # Compute Statistics across tickers (mean, std)
         mean_r_traj = np.mean(all_cum_rewards, axis=0)
@@ -612,10 +613,6 @@ class DRLAgent:
         ax1.set_ylabel(y_label)
         ax1.grid(True, linestyle='--', alpha=0.3)
         ax1.legend(loc='upper left')
-
-        ax1.set_title('Adj. Cum. Sum of Rewards Per Ticker')
-        ax1.set_xlabel('Time steps')
-        ax1.set_ylabel('Cum. Reward')
         
         # Right Plot: Distribution of the receieved rewards
         rewards_flat = reward_data.ravel()
@@ -634,16 +631,26 @@ class DRLAgent:
         
         mean_reward = np.mean(rewards_hist)
         median_reward = np.median(rewards_hist)
+        # Always include the outlier when computing skewness and kurtosis
+        skew_val = stats.skew(rewards_flat)
+        kurt_val = stats.kurtosis(rewards_flat)
         
         # Histogram without outliers
-        ax2.hist(rewards_hist, bins=30, alpha=0.6, edgecolor='black', label='Hist.', density=True)
-        # Include a KDE line
-        sns.kdeplot(rewards_hist, ax=ax2, label='KDE', color='orange')
+        ax2.hist(rewards_hist, bins=30, alpha=0.6, edgecolor='black', density=True)
+        # Include a KDE line with outliers
+        sns.kdeplot(rewards_flat, ax=ax2, label='KDE', color='orange')
         # Lines to show mean and the median
-        ax2.axvline(x=mean_reward, linestyle='--', label=f'μ (={mean_reward:.2f})')
-        ax2.axvline(x=median_reward, linestyle=':', label=f'Med. (={median_reward:.2f})')
+        ax2.axvline(x=mean_reward, linestyle='--', label=f'μ ({mean_reward:.2f})')
+        ax2.axvline(x=median_reward, linestyle=':', label=f'Med. ({median_reward:.2f})')
         
-        ax2.legend()
+        stats_text = f'Skew: {skew_val:.2f}\nKurt: {kurt_val:.2f}'
+        ax2.text(0.95, 0.95, stats_text,
+                 transform=ax2.transAxes,
+                 verticalalignment='top',
+                 horizontalalignment='right',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+        
+        ax2.legend(loc='upper left')
         ax2.set_title('Reward Distribution' + (' (No Outliers)' if remove_outliers else ''))
         ax2.set_xlabel('Reward')
         ax2.set_ylabel('Density')
