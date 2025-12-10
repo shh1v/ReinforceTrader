@@ -230,7 +230,7 @@ class EpisodeStateLoader:
         # This is a utility function to get aligned date index for test episodes
         # Used for aligning the signals and prices dataframes during backtesting
         start_date, end_date = self._get_episode_window('test', episode_id)
-        indices =  self._features_data.loc[start_date : end_date].index
+        indices =  self._features_data.iloc[start_date : end_date + 1].index
         
         return pd.DatetimeIndex(pd.to_datetime(indices))
 

@@ -861,10 +861,15 @@ class DRLAgent:
         df_idx = state_loader.get_test_dates(episode_id)
         
         for ticker in tqdm(all_tickers, desc=f'Testing episode {episode_id}', ncols=100):
-            # Prepare for the first iteration
-            # NOTE: t0 can be init to 0 instead of window size - 1 because
-            # of pad_overflow functionality in get_state_matrix
-            t0 = 0
+            # Init the start index
+            t0 = self._window_size - 1
+            
+            # Initalize the reward computes for the ticker
+            # NOTE: Some reward functions (like DSR, DDDR require) need
+            # a non-zero inital values of moments (i.e, a hot start)
+            Rts = [state_loader.get_reward_computes('test', episode_id, ticker, i)['1DFRet'] for i in range(t0)]
+            self._init_reward_params(Rts)
+            
             state = state_loader.get_state_matrix('test', episode_id, ticker, t0, self._window_size)
             prev_pos = DRLAgent.OUT_TRADE
 
@@ -894,6 +899,11 @@ class DRLAgent:
                     curr_pos = DRLAgent.OUT_TRADE
                 else:
                     curr_pos = prev_pos
+                
+                # Update the reward computes for the next iteration
+                fRt = state_loader.get_reward_computes('test', episode_id, ticker, t)['1DFRet']
+                Rt = fRt if curr_pos == DRLAgent.IN_TRADE else 0
+                self._update_reward_computes(Rt)
                 
                 # Advance to the next state and update prev_pos
                 next_state = state_loader.get_state_matrix('test', episode_id, ticker, t + 1, self._window_size)
