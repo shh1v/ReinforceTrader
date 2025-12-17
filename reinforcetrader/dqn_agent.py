@@ -220,10 +220,10 @@ class DRLAgent:
         if training and np.random.random() < self._epsilon:
             if trade_pos == DRLAgent.OUT_TRADE:
                 # A_{Out of trade}: {0: buy, 1: hold (out)}
-                return (np.random.randint(0, 1), None)
+                return (np.random.randint(0, 2), None)
             else:
                 # A_{In trade}: {1: hold (in), 2: sell}
-                return (np.random.randint(1, 2), None)
+                return (np.random.randint(1, 3), None)
 
         # Pick action from DQN with probability 1 - epsilon
         # Dont use dropout as act() function is not used for gradient descent updates
@@ -234,8 +234,17 @@ class DRLAgent:
         # Compute Q values from DQN and restrict action space
         q_values = self._get_q_values(state_matrix, all_reward_params) + self._get_mask(trade_pos) # type: ignore
         action = int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
-        pred_q_value = float(q_values[0, action])
         
+        # # Check if softmax output is requested
+        # # WARNING: Softmax q outputs the confidence. When compared across tickers,
+        # # it shows the 'actions' confidence for that action.
+        # # NOTE: The action with highest q value is choosen, even though it may have low confidence.
+        # if softmax:
+        #     pred_q_exp = tf.exp(q_values - tf.reduce_max(q_values))
+        #     soft_pred_q = pred_q_exp / tf.reduce_sum(pred_q_exp)
+        #     return (action, soft_pred_q.numpy()[0, action])
+        
+        pred_q_value = float(q_values[0, action])
         return (action, pred_q_value)
 
     def _exp_replay(self) -> float:
@@ -613,10 +622,11 @@ class DRLAgent:
         # IQR-based clipping to avoid outliers in histogram, mean, median
         Q1 = np.percentile(rewards_flat, 25)
         Q3 = np.percentile(rewards_flat, 75)
+        # Calculate upper and lower bounds
         IQR = Q3 - Q1
+        low = Q1 - 1.5 * IQR
+        high = Q3 + 1.5 * IQR
         if remove_outliers and IQR > 0:
-            low = Q1 - 1.5 * IQR
-            high = Q3 + 1.5 * IQR
             rewards_hist = rewards_flat[(rewards_flat >= low) & (rewards_flat <= high)]
             print(f'Removed {len(rewards_flat) - len(rewards_hist)} outliers from histogram.')
         else:
@@ -632,6 +642,9 @@ class DRLAgent:
         ax2.hist(rewards_hist, bins=30, alpha=0.6, edgecolor='black', density=True)
         # Include a KDE line with outliers
         sns.kdeplot(rewards_flat, ax=ax2, label='KDE', color='orange')
+        # However, limit x-axis if outliers are removed
+        if remove_outliers and IQR > 0:
+            ax2.set_xlim(left=low, right=high)
         # Lines to show mean and the median
         ax2.axvline(x=mean_reward, linestyle='--', label=f'μ ({mean_reward:.2f})')
         ax2.axvline(x=median_reward, linestyle=':', label=f'Med. ({median_reward:.2f})')
@@ -888,8 +901,8 @@ class DRLAgent:
                 close_px[t] = curr_close
 
                 # Derive action based on greedy policy
-                action, q_value = self._act(state, prev_pos, curr_ef, training=False)
-                sig_cells[t] = self._get_predict_dict(action, q_value) # type: ignore
+                action, soft_q = self._act(state, prev_pos, curr_ef, training=False)
+                sig_cells[t] = self._get_predict_dict(action, soft_q) # type: ignore
 
                 # Compute the current trade position based on new action
                 if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
