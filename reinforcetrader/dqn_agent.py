@@ -91,6 +91,11 @@ class DRLAgent:
             raise ValueError(f'Invalid reward type: {reward_type}')
         self.reward_type = reward_type
         
+        # Compute the number of reward params to make its a valid MDP
+        # Note: num_reward_params should have -1 (Rt is not included)
+        # and +1 (trade pos is included). Thus net 0
+        self.num_reward_params = len(self._reward_param_keys(self.reward_type))
+        
         # A = {0: buy, 1: hold, 2: sell}
         self._action_size = 3
         
@@ -112,7 +117,6 @@ class DRLAgent:
         # Store the model name for pre loading a model
         self._model_path = model_path
         
-
         # Define parameters for behaviour policy and temporal learning
         self._gamma = agent_config.get('gamma', 0.95)  # discount factor
         self._epsilon = agent_config.get('epsilon_start', 1.0)
@@ -127,6 +131,10 @@ class DRLAgent:
         learning_rate = agent_config.get('learning_rate', 1e-3)
         dropout_p = agent_config.get('dropout_p', 0.1)
 
+        # Extract training parameters from config
+        self.replay_start_size = agent_config.get('replay_start_size', 5000)
+        self.train_interval = agent_config.get('train_interval', 1)
+        self.batch_size = agent_config.get('batch_size', 256)
 
         # Load model or define new
         if self._model_path is not None:
@@ -137,6 +145,9 @@ class DRLAgent:
         
         # Init target network update and frequency
         self._init_target_network()
+        
+        # Init exp reply batch arrays
+        self.init_exp_replay_batches()
     
     def get_model(self) -> keras.Model:
         return self._model
@@ -144,14 +155,9 @@ class DRLAgent:
     def _init_model(self, learning_rate: float, dropout_p: float) -> keras.Model:
         # Compute state shapes for the model
         state_shape = (self._window_size, self._num_features)
-        
-        # Compute the number of reward params to make its a valid MDP
-        # Note: num_reward_params should have -1 (Rt is not included)
-        # and +1 (trade pos is included). Thus net 0
-        num_reward_params = len(self._reward_param_keys(self.reward_type))
 
         # Init the DQN model
-        DDDQN = DualBranchDQN(state_shape, num_reward_params, self._action_size, learning_rate, dropout_p)
+        DDDQN = DualBranchDQN(state_shape, self.num_reward_params, self._action_size, learning_rate, dropout_p)
 
         return DDDQN.get_model()
 
@@ -160,6 +166,15 @@ class DRLAgent:
         self._target_model = keras.models.clone_model(self._model)
         self._target_model.set_weights(self._model.get_weights())
 
+    def init_exp_replay_batches(self) -> None:
+        # Create batch arrays for experience replay
+        B, W, F, R = self.batch_size, self._window_size, self._num_features, self.num_reward_params
+        self.state_batch = np.empty((B, W, F), dtype=np.float32)
+        self.rwd_params_batch = np.empty((B, R), dtype=np.float32)
+        self.next_state_batch = np.empty((B, W, F), dtype=np.float32)
+        self.next_rwd_params_batch = np.empty((B, R), dtype=np.float32)
+        self.actions = np.empty((B,), dtype=np.int32)
+        self.rewards = np.empty((B,), dtype=np.float32)
 
     def _update_target_network(self, tau: float = 1.0) -> None:
         # tau = 1.0 : hard update (copy weights exactly)
@@ -175,31 +190,28 @@ class DRLAgent:
         self._target_model.set_weights(new_weights)
 
     
-    def _get_states(self, state_matrix: np.ndarray, extra_features: list[float]) -> dict[str, np.ndarray]:
+    def _get_states(self, state_matrix: np.ndarray, reward_params: list[float]) -> dict[str, np.ndarray]:
         # Check the state matrix shape is correct
-        total_features = self._num_motif_feat + self._num_context_feat
-        if state_matrix.shape != (self._window_size, total_features):
+        if state_matrix.shape != (self._window_size, self._num_features):
             raise ValueError(f'Invalid state matrix shape: {state_matrix.shape}')
         
-        # Define the motif input
+        # Define the state input
         # Expand dims from [window, num_features] to [batch_size=1, window, num_features]
-        motif_input = np.expand_dims(state_matrix[:, :self._num_motif_feat], axis=0).astype(np.float32)
+        state_input = np.expand_dims(state_matrix, axis=0).astype(np.float32)
 
-        # Flatten the context input and combine with other features (e.g. trade pos, reward params)
-        context_flat = state_matrix[:, self._num_motif_feat:].astype(np.float32).reshape(1, -1)
-        extra_context = np.array([extra_features], dtype=np.float32)
-        context_input = np.concatenate([context_flat, extra_context], axis=1)
+        # Create a numpy array for reward params
+        reward_input = np.array([reward_params], dtype=np.float32)
 
-        return {'motif_input': motif_input, 'context_input': context_input}
+        return {'state_input': state_input, 'reward_input': reward_input}
     
-    def _get_q_values(self, state_matrix: np.ndarray, extra_features: list[float]) -> tf.Tensor:
+    def _get_q_values(self, state_matrix: np.ndarray, reward_params: list[float]) -> tf.Tensor:
         # Predict q values through DQN        
-        model_input = self._get_states(state_matrix, extra_features)
+        model_input = self._get_states(state_matrix, reward_params)
         q_values = self._model(model_input, training=False)
         
         return q_values
     
-    def _act(self, state_matrix: np.ndarray, trade_pos: int, extra_features: list[float], training: bool=True) -> tuple[int, float | None]:
+    def _act(self, state_matrix: np.ndarray, trade_pos: int, reward_params: list[float], training: bool=True) -> tuple[int, float | None]:
         if trade_pos not in {DRLAgent.IN_TRADE, DRLAgent.OUT_TRADE}:
             raise ValueError(f'Invalid trade position: {trade_pos}')
         
@@ -217,49 +229,34 @@ class DRLAgent:
         # Dont use dropout as act() function is not used for gradient descent updates
         
         # Construct the extra set of computes used to construct state representation
-        extra_context = [trade_pos] + extra_features
+        all_reward_params = [trade_pos] + reward_params
         
         # Compute Q values from DQN and restrict action space
-        q_values = self._get_q_values(state_matrix, extra_context) + self._get_mask(trade_pos) # type: ignore
+        q_values = self._get_q_values(state_matrix, all_reward_params) + self._get_mask(trade_pos) # type: ignore
         action = int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
         pred_q_value = float(q_values[0, action])
         
         return (action, pred_q_value)
 
-    def _exp_replay(self, batch_size: int) -> float:
-        if len(self._memory) < batch_size:
+    def _exp_replay(self) -> float:
+        if len(self._memory) < self.batch_size:
             raise ValueError('Not enough samples in memory to perform experience replay')
 
         # Prefer uniform sampling to break time correlations
-        idx = np.random.choice(len(self._memory), size=batch_size, replace=False)
+        idx = np.random.choice(len(self._memory), size=self.batch_size, replace=False)
         batch = [self._memory[i] for i in idx]
-
-        # Prepare the batch arrays
-        B, W, M, C = batch_size, self._window_size, self._num_motif_feat, self._num_context_feat
-        extra_context_len = len(self._reward_param_keys(self.reward_type)) # (...) + 1 - 1
-        motif_batch = np.empty((B, W, M), dtype=np.float32)
-        context_batch = np.empty((B, W*C + extra_context_len), dtype=np.float32)
-        next_motif_batch = np.empty((B, W, M), dtype=np.float32)
-        next_context_batch = np.empty((B, W*C + extra_context_len), dtype=np.float32)
-        actions = np.empty((B,), dtype=np.int32)
-        rewards = np.empty((B,), dtype=np.float32)
         
         # Create a mask to restrict the action space
         next_action_mask = []
 
         for i, (state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos) in enumerate(batch):
-            # Extract state components for feeding to DQN braches
             # Compute the current state features for dual branch
-            motif = state[:, :M].astype(np.float32)
-            ctx = state[:, M:].astype(np.float32).reshape(-1)
-            motif_batch[i] = motif
-            context_batch[i] = np.concatenate([ctx, [prev_pos], curr_ef], axis=0, dtype=np.float32)
+            self.state_batch[i] = state
+            self.rwd_params_batch[i] = np.concatenate([[prev_pos], curr_ef], axis=0, dtype=np.float32)
             
             # Compute the next state features for dual branch
-            next_motif = next_state[:, :M].astype(np.float32)
-            next_ctx = next_state[:, M:].astype(np.float32).reshape(-1)  # [W*C]
-            next_motif_batch[i] = next_motif
-            next_context_batch[i] = np.concatenate([next_ctx, [curr_pos], next_ef], axis=0, dtype=np.float32)
+            self.next_state_batch[i] = next_state
+            self.next_rwd_params_batch[i] = np.concatenate([[curr_pos], next_ef], axis=0, dtype=np.float32)
             
             # Add the appropriate mask based on curr_pos
             # NOTE: Action mask is used for masking next q values.
@@ -267,16 +264,16 @@ class DRLAgent:
             next_action_mask.append(self._get_mask(curr_pos))
             
             # Set the action and reward
-            actions[i] = action
-            rewards[i] = reward
+            self.actions[i] = action
+            self.rewards[i] = reward # type: ignore
         
         # Create tensor for action mask and rewards for arithmetic later
         next_action_mask = tf.stack(next_action_mask, axis=0)
-        rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
+        self.rewards = tf.convert_to_tensor(self.rewards, dtype=tf.float32)
         
         # Prepare current and next state inputs
-        curr_state = {'motif_input': motif_batch, 'context_input': context_batch}
-        next_state = {'motif_input': next_motif_batch, 'context_input': next_context_batch}
+        curr_state = {'state_input': self.state_batch, 'reward_input': self.rwd_params_batch}
+        next_state = {'state_input': self.next_state_batch, 'reward_input': self.next_rwd_params_batch}
         
         # Predict Q values for current and next states and restrict action space
         # NOTE: training=False for not using dropout layers.
@@ -292,10 +289,10 @@ class DRLAgent:
         max_q_next = tf.gather_nd(q_next_target, tf.stack([batch_indices, a_star], axis=1))
         
         # Compute observed returns using Bellman equation
-        returns = rewards + (self._gamma * max_q_next)
+        returns = self.rewards + (self._gamma * max_q_next)
         
         # Create targets by updating only the taken actions' q values
-        target_actions = tf.stack([batch_indices, tf.convert_to_tensor(actions, dtype=tf.int32)], axis=1)
+        target_actions = tf.stack([batch_indices, tf.convert_to_tensor(self.actions, dtype=tf.int32)], axis=1)
         targets = tf.tensor_scatter_nd_update(q_current, target_actions, returns)
 
         loss = self._model.train_on_batch(curr_state, targets)
@@ -304,7 +301,7 @@ class DRLAgent:
         return float(loss)
     
     def _compute_loss(self, curr_state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos) -> float:
-        # Compute the loss without training
+        # TODO: Compute the loss without training
         # (Used for computing training error)
         
         return 0.0
@@ -328,10 +325,7 @@ class DRLAgent:
             raise ValueError(f"Missing required reward parameters for {self.reward_type}: {missing_params}")
         
         # Determine if transaction costs are applicable
-        if action == DRLAgent.A_HOLD:
-            tc = 0 # No cost for holding
-        else:
-            tc = 0.25 / 100 # 0.25%
+        tc = 0 if action == DRLAgent.A_HOLD else 2.5e-3
         
         # Compute the reward based on the selected type
         match self.reward_type:
@@ -436,11 +430,6 @@ class DRLAgent:
         os.makedirs(train_config['model_dir'], exist_ok=True)
         os.makedirs(train_config['plots_dir'], exist_ok=True)
         os.makedirs(train_config['logs_dir'], exist_ok=True)
-
-        # Extract training parameters from config
-        replay_start_size = train_config.get('replay_start_size', 5000)
-        train_interval = train_config.get('train_interval', 1)
-        batch_size = train_config.get('batch_size', 256)
         
         logs_by_episode = {}
 
@@ -521,10 +510,10 @@ class DRLAgent:
                     env_steps += 1
                     
                     # train from replay if enough samples; accumulate training loss for this group
-                    if len(self._memory) >= replay_start_size:
+                    if len(self._memory) >= self.replay_start_size:
                         # Train every train_interval steps
-                        if env_steps % train_interval == 0:
-                            loss = self._exp_replay(batch_size)
+                        if env_steps % self.train_interval == 0:
+                            loss = self._exp_replay()
                             train_loss += loss
                                 
                             # Decay epsilon slowly until min
