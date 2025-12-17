@@ -27,30 +27,30 @@ from .state import EpisodeStateLoader
 @keras.utils.register_keras_serializable()
 # Define DQN Model Architecture
 class DualBranchDQN(keras.Model):
-    def __init__(self, motif_state_shape: tuple[int, int], context_state_size: int, action_size: int, learning_rate: float, dropout_p: float=0.1) -> None:
+    def __init__(self, state_shape: tuple[int, int], num_reward_feat: int, action_size: int, learning_rate: float, dropout_p: float=0.1) -> None:
         super().__init__()
 
-        # Motif Branch for finding 1-day price movement patterns using Conv1D
-        motif_input = Input(shape=motif_state_shape, name='motif_input')
-        motif_layer = layers.Conv1D(filters=32, kernel_size=1, padding='same', activation='relu')(motif_input)
-        motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(motif_layer)
-        motif_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(motif_layer)
+        # All state features go through Conv1D
+        state_input = Input(shape=state_shape, name='state_input')
+        state_layer = layers.Conv1D(filters=32, kernel_size=1, padding='same', activation='relu')(state_input)
+        state_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(state_layer)
+        state_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(state_layer)
         
-        motif_max = layers.GlobalMaxPooling1D()(motif_layer)
-        motif_avg = layers.GlobalAveragePooling1D()(motif_layer)
+        state_max = layers.GlobalMaxPooling1D()(state_layer)
+        state_avg = layers.GlobalAveragePooling1D()(state_layer)
         
-        motif_out = layers.Concatenate(name='motif_output')([motif_max, motif_avg])
+        state_out = layers.Concatenate(name='state_output')([state_max, state_avg])
 
-        # Context Branch consisting of technical indicators
-        context_input = Input(shape=(context_state_size,), name='context_input')
-        context_layer = layers.Dense(units=256, activation='relu')(context_input)
-        context_layer = layers.Dropout(dropout_p)(context_layer)
-        context_layer = layers.Dense(units=128, activation='relu')(context_layer)
-        context_layer = layers.Dropout(dropout_p)(context_layer)
-        context_out = layers.Dense(units=64, activation='relu', name='context_output')(context_layer)
+        # Second branch for reward features (e.g., trade_pos, A_t, B_t, DD_t, etc.)
+        reward_input = Input(shape=(num_reward_feat,), name='reward_input')
+        reward_layer = layers.Dense(units=32, activation='relu')(reward_input)
+        reward_layer = layers.Dropout(dropout_p)(reward_layer)
+        reward_layer = layers.Dense(units=16, activation='relu')(reward_layer)
+        reward_layer = layers.Dropout(dropout_p)(reward_layer)
+        reward_out = layers.Dense(units=4, activation='relu', name='reward_output')(reward_layer)
         
-        # Late fusion of both the motif and context branches
-        fused_branch = layers.Concatenate(name='late_fusion')([motif_out, context_out])
+        # Late fusion of both the state and reward branches
+        fused_branch = layers.Concatenate(name='late_fusion')([state_out, reward_out])
         fused_branch = layers.Dense(64, activation='relu')(fused_branch)
         fused_branch = layers.Dense(32, activation='relu')(fused_branch)
         
@@ -61,11 +61,12 @@ class DualBranchDQN(keras.Model):
         A = layers.Dense(action_size, name='advantage_value')(A)
         
         # Combine to compute the Q values
+        # Q = V(s) + (A(s,a) - mean(A(s,*)))
         mA = K.mean(A, axis=1, keepdims=True)
         cA = layers.Subtract(name='center_advantage')([A, mA])
         Q = layers.Add(name='q_values')([V, cA])
         
-        model_input = {'motif_input': motif_input, 'context_input': context_input}
+        model_input = {'state_input': state_input, 'reward_input': reward_input}
         self._model = keras.Model(inputs=model_input, outputs=Q, name='DualBranchDQN')
         self._model.compile(loss=keras.losses.Huber(), optimizer=optimizers.Adam(learning_rate, clipnorm=0.5))
 
@@ -85,8 +86,7 @@ class DRLAgent:
     def __init__(self, agent_config, reward_type: str='DSR', model_path: str | None=None) -> None:
         # Store state and action representation configurations
         self._window_size = agent_config['state_matrix_window']
-        self._num_motif_feat = agent_config['num_motif_features']
-        self._num_context_feat = agent_config['num_context_features']
+        self._num_features = agent_config['num_features']
         if reward_type not in {'DSR', 'DDDR', 'PNL'}:
             raise ValueError(f'Invalid reward type: {reward_type}')
         self.reward_type = reward_type
@@ -143,18 +143,15 @@ class DRLAgent:
 
     def _init_model(self, learning_rate: float, dropout_p: float) -> keras.Model:
         # Compute state shapes for the model
-        motif_shape = (self._window_size, self._num_motif_feat)
+        state_shape = (self._window_size, self._num_features)
         
         # Compute the number of reward params to make its a valid MDP
         # Note: num_reward_params should have -1 (Rt is not included)
         # and +1 (trade pos is included). Thus net 0
         num_reward_params = len(self._reward_param_keys(self.reward_type))
-        
-        # Compute the context size
-        context_size = self._window_size * self._num_context_feat + num_reward_params
 
-        # Init model
-        DDDQN = DualBranchDQN(motif_shape, context_size, self._action_size, learning_rate, dropout_p)
+        # Init the DQN model
+        DDDQN = DualBranchDQN(state_shape, num_reward_params, self._action_size, learning_rate, dropout_p)
 
         return DDDQN.get_model()
 
@@ -305,6 +302,12 @@ class DRLAgent:
         self._update_target_network(tau=0.001)
 
         return float(loss)
+    
+    def _compute_loss(self, curr_state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos) -> float:
+        # Compute the loss without training
+        # (Used for computing training error)
+        
+        return 0.0
     
     def _reward_param_keys(self, reward_type: str) -> set[str]:
         # Small Helper method. Uff..
@@ -663,6 +666,7 @@ class DRLAgent:
     def _run_validation(self, state_loader: EpisodeStateLoader, episode_id: int, tickers: list[str]) -> dict[str, int | float]:
         # The agent does no exploration, only exploitation
         # Define metrics to track for validation cycle
+        total_loss = 0.0
         cum_reward = 0.0
         total_trades = 0
         winning_trade_count = 0
@@ -754,7 +758,10 @@ class DRLAgent:
                 next_state = state_loader.get_state_matrix('validate', episode_id, ticker, t + 1, self._window_size)
                 
                 # Update the reward computes for the next iteration
-                self._update_reward_computes(Rt)
+                next_ef = list(self._update_reward_computes(Rt).values())
+                
+                # Compute the validation error/loss
+                total_loss += self._compute_loss(state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos)
                 
                 # Advance to the next state
                 state =  next_state

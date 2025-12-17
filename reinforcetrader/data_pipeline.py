@@ -186,13 +186,13 @@ class FeatureBuilder:
         OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
         # Include the stock returns for the reward fn (e.g. DSR or DDDR)
         returns_f = [f'1DFRet']
-        # Include motif feature to identify candlestick patterns
-        motif_f = ['Body/HL', 'UWick/HL', 'LWick/HL', 'Gap', 'GapFill']
-        # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
-        technical_f = ['EMA5/13', 'EMA13/26', 'EMA26/50', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
+        # Include all the DQN features used in state representations
+        state_f = ['Body/HL', 'UWick/HL', 'LWick/HL', 'Gap', 'GapFill',
+                        'EMA5/13', 'EMA13/26', 'EMA26/50', 'B%B', 'BBW',
+                        'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
-        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + returns_f + motif_f + technical_f],
+        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + returns_f + state_f],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._ticker_data.index, columns=feature_columns, dtype=float)
         
@@ -304,7 +304,7 @@ class FeatureBuilder:
         feature_indices = {
             'OHLCV': np.flatnonzero(feat_level.isin(OHLCV_f)),
             'Rewards': np.flatnonzero(feat_level.isin(returns_f)),
-            'State': np.flatnonzero(feat_level.isin(motif_f + technical_f))
+            'State': np.flatnonzero(feat_level.isin(state_f))
         }
         
         self._feature_indices = feature_indices
