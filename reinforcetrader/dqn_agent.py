@@ -274,11 +274,12 @@ class DRLAgent:
             
             # Set the action and reward
             self.actions[i] = action
-            self.rewards[i] = reward # type: ignore
+            self.rewards[i] = reward
         
         # Create tensor for action mask and rewards for arithmetic later
         next_action_mask = tf.stack(next_action_mask, axis=0)
-        self.rewards = tf.convert_to_tensor(self.rewards, dtype=tf.float32)
+        # NOTE: Not self.rewards for code breaking due to looping logic above
+        rewards = tf.convert_to_tensor(self.rewards, dtype=tf.float32)
         
         # Prepare current and next state inputs
         curr_state = {'state_input': self.state_batch, 'reward_input': self.rwd_params_batch}
@@ -294,11 +295,11 @@ class DRLAgent:
         # Note: use online table to get action with highest q value for next state
         # Then, use the target table q table to compute q value for next state
         a_star = tf.argmax(q_next_online, axis=1, output_type=tf.int32)
-        batch_indices = tf.range(B, dtype=tf.int32)
+        batch_indices = tf.range(self.batch_size, dtype=tf.int32)
         max_q_next = tf.gather_nd(q_next_target, tf.stack([batch_indices, a_star], axis=1))
         
         # Compute observed returns using Bellman equation
-        returns = self.rewards + (self._gamma * max_q_next)
+        returns = rewards + (self._gamma * max_q_next)
         
         # Create targets by updating only the taken actions' q values
         target_actions = tf.stack([batch_indices, tf.convert_to_tensor(self.actions, dtype=tf.int32)], axis=1)
@@ -310,10 +311,33 @@ class DRLAgent:
         return float(loss)
     
     def _compute_loss(self, curr_state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos) -> float:
-        # TODO: Compute the loss without training
-        # (Used for computing training error)
+        # Prepare states
+        curr_input = self._get_states(curr_state, [prev_pos] + curr_ef)
+        next_input = self._get_states(next_state, [curr_pos] + next_ef)
         
-        return 0.0
+        # Get mask for next action
+        next_action_mask = self._get_mask(curr_pos)
+        
+        # Forward Passes
+        q_current = self._model(curr_input, training=False)
+        q_next_online = self._model(next_input, training=False) + next_action_mask
+        q_next_target = self._target_model(next_input, training=False) + next_action_mask
+        
+        # Double DQN Logic
+        a_star = tf.argmax(q_next_online[0], output_type=tf.int32)
+        max_q_next = q_next_target[0, a_star]
+        
+        # Compute Bellman Target (Scalar)
+        target_value = reward + (self._gamma * max_q_next)
+        
+        # Construct Full Target Vector
+        q_target = q_current.numpy() 
+        q_target[0, action] = float(target_value)
+        
+        # Compute Loss based on the model's loss function
+        loss_val = self._model.loss(q_target, q_current)
+        
+        return float(loss_val)
     
     def _reward_param_keys(self, reward_type: str) -> set[str]:
         # Small Helper method. Uff..
@@ -440,8 +464,15 @@ class DRLAgent:
         os.makedirs(train_config['plots_dir'], exist_ok=True)
         os.makedirs(train_config['logs_dir'], exist_ok=True)
         
+        # Init for logging and plotting purposes
+        train_losses = []
+        val_losses = []
         logs_by_episode = {}
-
+        eps_start = []
+        eps_curr = []
+        eps_end = []
+        
+        # Get all tickers symbols
         all_tickers = state_loader.get_all_tickers()
 
         for e in episode_ids:
@@ -541,13 +572,22 @@ class DRLAgent:
             
             # Print the validation summary
             print(f'Episode {e} validation summary:')
-            print(f"Train loss: {train_loss:.4f}, Cum. Reward: {val_result['cum_reward']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
+            print(f"Train loss: {train_loss:.4f}, Val loss: {val_result['total_loss']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
             print(f"Trade Duration: {val_result['trade_duration']:.2f}, Total PnL: {val_result['total_pnl']:.2f}, Profit Factor: {val_result['profit_factor']:.3f}")
             print(f"Force End Trade Count: {val_result['force_end_trades']}, Force End PnL: {val_result['force_end_pnl']:.2f}")
+            
+            # Append the train_losses and val_losses
+            train_losses.append(train_loss)
+            val_losses.append(val_result['total_loss'])
             
             # Boost the epsilon a bit for next episode (as every episode has diff regimes)
             epsilon_end = self._epsilon
             self._epsilon = epsilon_end + self._epsilon_boost_factor * (epsilon_start - epsilon_end)
+            
+            # Append epsilon values for plotting
+            eps_start.append(epsilon_start)
+            eps_curr.append(self._epsilon)
+            eps_end.append(epsilon_end)
             
             # Store logs for this episode
             logs_by_episode[e] = {
@@ -559,14 +599,9 @@ class DRLAgent:
             }
             
         # Plot all the training and validation losses
-        train_losses = [logs_by_episode[ep]['train_loss'] for ep in episode_ids]
-        val_losses = [-logs_by_episode[ep]['val_results']['cum_reward'] for ep in episode_ids]
-        self._plot_losses(train_losses, val_losses, fname=os.path.join(train_config['plots_dir'], 'train_losses.png'))
+        self._plot_losses(train_losses, val_losses, fname=os.path.join(train_config['plots_dir'], 'episode_losses.png'))
         
-        # Also plot the epsilon decay
-        eps_start = [logs_by_episode[ep]['epsilon_start'] for ep in episode_ids] 
-        eps_curr = [logs_by_episode[ep]['epsilon_current'] for ep in episode_ids] 
-        eps_end = [logs_by_episode[ep]['epsilon_end'] for ep in episode_ids] 
+        # Plot the epsilon decay
         eps_fname = os.path.join(train_config['plots_dir'], 'epsilon_decay.png')
         self._plot_epsilon_decay(eps_start, eps_curr, eps_end, fname=eps_fname)
         
@@ -776,6 +811,7 @@ class DRLAgent:
         profit_factor = gross_profit / max(abs(gross_loss), 1e-12)
         
         return {
+            'total_loss': total_loss,
             'cum_reward': cum_reward,
             'total_trades': total_trades,
             'trade_duration': trade_duration,
