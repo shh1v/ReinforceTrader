@@ -130,15 +130,14 @@ class RawDataLoader:
         return self._ticker_data, self._benchmark_data
 
 class FeatureBuilder:
-    def __init__(self, ticker_data, benchmark_data: pd.DataFrame, return_horizons: list[int], index: str='DJI') -> None:
+    def __init__(self, ticker_data, benchmark_data: pd.DataFrame, f_prefix: str) -> None:
         if ticker_data.empty or benchmark_data.empty:
             raise ValueError('Ticker data and benchmark data cannot be empty.')
         
         self._ticker_data = ticker_data.sort_index()
         self._benchmark_data = benchmark_data.sort_index()
         
-        self._return_horizons = return_horizons
-        self._index = index
+        self._f_prefix = f_prefix
         
         self._features_data = None
         self._feature_indices = None
@@ -154,7 +153,7 @@ class FeatureBuilder:
         dates = self._features_data.index
         start_date = dates[0].strftime('%Y-%m-%d')
         end_date = dates[-1].strftime('%Y-%m-%d')
-        file_path = save_dir / f"{self._index}_tickers_features_{start_date}_{end_date}.csv"
+        file_path = save_dir / f"{self._f_prefix}_tickers_features_{start_date}_{end_date}.csv"
 
         # Check if feature file already exists
         if file_path.exists():
@@ -183,23 +182,19 @@ class FeatureBuilder:
         tickers = self._ticker_data.columns.get_level_values('Ticker').unique()
 
         # Predefine feature names
-        # Include OHLCV for reward fn, portfolio managment, and more
+        # Include OHLCV portfolio managment and more
         OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
-        # Include excess returns over specifiied horizons
-        ex_ret_f = [f'ExRet{h}' for h in self._return_horizons]
-        # Include motif feature to identify candlestick patterns
-        motif_f = ['Body/HL', 'UShadow/HL', 'LShadow/HL', 'Gap', 'GapFill']
-        # Include technical indicators like EMA, Bollinger Band Width, RSI, and others
-        technical_f = ['EMA5/EMA13', 'EMA13/EMA26', 'EMA26/EMA50', 'B%B', 'BBW', 'RSI', 'ADX', 'V/Vol20']
+        # Include the stock returns for the reward fn (e.g. DSR or DDDR)
+        returns_f = [f'1DFRet']
+        # Include all the DQN features used in state representations
+        state_f = ['Body/HL', 'UWick/HL', 'LWick/HL', 'Gap', 'GapFill',
+                        'EMA5/13', 'EMA13/26', 'EMA26/50', 'B%B', 'BBW',
+                        'RSI', 'ADX', 'V/Vol20']
 
         # Predefine the feature dataframe
-        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + ex_ret_f + motif_f + technical_f],
+        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + returns_f + state_f],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._ticker_data.index, columns=feature_columns, dtype=float)
-        
-        # Compute benchmark returns for excess return calculation
-        bc = self._benchmark_data['Close']
-        benchmark_returns = {h: np.log(bc.shift(-h) / bc) for h in self._return_horizons}
         
         for ticker in tqdm(tickers, ncols=100, desc='Building ticker features'):
             o = self._ticker_data[ticker]['Open']
@@ -218,14 +213,8 @@ class FeatureBuilder:
             # Use eps to avoid division by zero
             eps = np.finfo(float).eps
             
-            # Compute excess returns over specified horizons
-            for hzn in self._return_horizons:
-                # Compute the log returns for the ticker
-                ticker_returns = np.log(c.shift(-hzn) / c)
-                
-                # Compute excess return and normalize
-                ex_ret = ticker_returns - benchmark_returns[hzn]
-                self._features_data.loc[:, (ticker, f'ExRet{hzn}')] = ex_ret
+            # Compute the 1-day forward returns
+            self._features_data.loc[:, (ticker, '1DFRet')] = (c.shift(-1) / c) - 1
             
             # Compute the candle body features
             # Body relative to total range, clip for stability
@@ -237,12 +226,12 @@ class FeatureBuilder:
             ).clip(-1.0, 1.0)
 
             # Upper shadow relative to range
-            self._features_data.loc[:, (ticker, 'UShadow/HL')] = (
+            self._features_data.loc[:, (ticker, 'UWick/HL')] = (
                     (h - np.maximum(o, c)) / candle_height
             ).clip(0.0, 1.0)
 
             # Lower shadow relative to range
-            self._features_data.loc[:, (ticker, 'LShadow/HL')] = (
+            self._features_data.loc[:, (ticker, 'LWick/HL')] = (
                 (np.minimum(o, c) - l) / candle_height
             ).clip(0.0, 1.0)
             
@@ -271,9 +260,9 @@ class FeatureBuilder:
             ema50 = EMAIndicator(close=c, window=50).ema_indicator()
 
             # Compute the EMA ratios
-            self._features_data.loc[:, (ticker, 'EMA5/EMA13')] = self._norm((ema5 / ema13) - 1)
-            self._features_data.loc[:, (ticker, 'EMA13/EMA26')] = self._norm((ema13 / ema26) - 1)
-            self._features_data.loc[:, (ticker, 'EMA26/EMA50')] = self._norm((ema26 / ema50) - 1)
+            self._features_data.loc[:, (ticker, 'EMA5/13')] = self._norm((ema5 / ema13) - 1)
+            self._features_data.loc[:, (ticker, 'EMA13/26')] = self._norm((ema13 / ema26) - 1)
+            self._features_data.loc[:, (ticker, 'EMA26/50')] = self._norm((ema26 / ema50) - 1)
 
 
             # Compute Bollinger Bands (%B and Bandwidth)
@@ -310,11 +299,12 @@ class FeatureBuilder:
         
         # build once at the end of build_features
         feat_level = self._features_data.columns.get_level_values('Feature').unique()
-
+        
+        # Rewards are seperated from other features to avoid data leakage causing bias    
         feature_indices = {
             'OHLCV': np.flatnonzero(feat_level.isin(OHLCV_f)),
-            'Rewards': np.flatnonzero(feat_level.isin(ex_ret_f)),
-            'State': np.flatnonzero(feat_level.isin(motif_f + technical_f))
+            'Rewards': np.flatnonzero(feat_level.isin(returns_f)),
+            'State': np.flatnonzero(feat_level.isin(state_f))
         }
         
         self._feature_indices = feature_indices
