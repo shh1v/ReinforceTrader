@@ -118,8 +118,8 @@ class BackTester:
         
         plt.figure(figsize=(12, 6))
         plt.plot(self._cum_strategy_returns, label='Strategy Returns')
-        plt.plot(self._cum_EWP_returns, label='EWP Returns')
-        plt.plot(self._cum_index_returns, label='Index Returns (Buy/Hold)')
+        plt.plot(self._cum_EWP_returns, label='EWP Returns (Daily Rblc)')
+        plt.plot(self._cum_index_returns, label='Index Returns (Buy and Hold)')
         
         plt.title('Cumulative Returns')
         plt.xlabel('Date')
@@ -189,6 +189,6 @@ class BackTester:
             "Information Ratio (vs Index, ann)": info_ratio,
         }
         
-        casted_metrics = {k: int(v) if v.is_integer() else float(v) for k, v in metrics.items()}
+        casted_metrics = {k: int(v) if v.is_integer() else round(float(v), 3) for k, v in metrics.items()}
         
         return pformat(casted_metrics, sort_dicts=False)

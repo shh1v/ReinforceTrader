@@ -32,7 +32,7 @@ class DualBranchDQN(keras.Model):
 
         # All state features go through Conv1D
         state_input = Input(shape=state_shape, name='state_input')
-        state_layer = layers.Conv1D(filters=32, kernel_size=1, padding='same', activation='relu')(state_input)
+        state_layer = layers.Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(state_input)
         state_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(state_layer)
         state_layer = layers.Conv1D(filters=32, kernel_size=3, padding='same', activation='relu')(state_layer)
         
@@ -161,6 +161,12 @@ class DRLAgent:
 
         return DDDQN.get_model()
 
+    def plot_model_arch(self, fname: str | None=None) -> None:
+        if fname is not None and fname:
+            return plot_model(self._model, to_file=fname, show_shapes=True, show_layer_names=True)
+        
+        return plot_model(self._model, show_shapes=True, show_layer_names=True)
+    
     def _init_target_network(self) -> None:
         # Make a structural clone and copy weights
         self._target_model = keras.models.clone_model(self._model)
@@ -458,7 +464,7 @@ class DRLAgent:
                 pass
         return self._get_reward_computes()
 
-    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any]) -> dict[str, Any]:
+    def train(self, state_loader: EpisodeStateLoader, episode_ids: list[int], train_config: dict[str, Any]) -> None:
         # Make req. directories if not exist
         os.makedirs(train_config['model_dir'], exist_ok=True)
         os.makedirs(train_config['plots_dir'], exist_ok=True)
@@ -612,8 +618,6 @@ class DRLAgent:
         # Save logs to a json file
         with open(os.path.join(train_config['logs_dir'], f'train_logs_{date_str}.json'), 'w') as f:
             json.dump(logs_by_episode, f, indent=2)
-
-        return logs_by_episode
 
     def _plot_rewards(self, reward_reqs, reward_data, plot_name: str, remove_outliers: bool=True) -> None:
         # Reward reqs are used by some reward function to compute cumulative reward
@@ -844,7 +848,6 @@ class DRLAgent:
             plt.close()
     
     def _plot_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None, show: bool = True):
-
         x = np.arange(1, len(train_losses) + 1)
 
         fig, ax1 = plt.subplots(figsize=(10, 4))

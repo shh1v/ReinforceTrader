@@ -105,7 +105,7 @@ class RawDataLoader:
 
         return data
 
-    def _load_hist_prices(self, tickers: list, load_from_cache, cache_path: str='data/raw') -> pd.DataFrame:
+    def _load_hist_prices(self, tickers: list, load_from_cache, cache_path: str='../data/raw') -> pd.DataFrame:
 
         # Build cache directory and file path
         cache_dir = Path(cache_path)
@@ -142,7 +142,7 @@ class FeatureBuilder:
         self._features_data = None
         self._feature_indices = None
 
-    def _save_features_data(self, save_dir='data/processed') -> bool:
+    def _save_features_data(self, save_dir='../data/processed') -> bool:
         if self._features_data is None or self._features_data.empty:
             print('Features data not built or empty')
             return False
