@@ -64,11 +64,12 @@ class DualBranchDQN(keras.Model):
         # Q = V(s) + (A(s,a) - mean(A(s,*)))
         mA = K.mean(A, axis=1, keepdims=True)
         cA = layers.Subtract(name='center_advantage')([A, mA])
+        
         Q = layers.Add(name='q_values')([V, cA])
         
         model_input = {'state_input': state_input, 'reward_input': reward_input}
         self._model = keras.Model(inputs=model_input, outputs=Q, name='DualBranchDQN')
-        self._model.compile(loss=keras.losses.Huber(), optimizer=optimizers.Adam(learning_rate, clipnorm=0.5))
+        self._model.compile(loss=keras.losses.Huber(), optimizer=optimizers.Adam(learning_rate, clipnorm=1.0))
 
     def get_model(self):
         return self._model
@@ -139,7 +140,7 @@ class DRLAgent:
         # Load model or define new
         if self._model_path is not None:
             print(f'Loading model from {self._model_path}')
-            self._model = keras.models.load_model(model_path)
+            self._model = keras.models.load_model(self._model_path)
         else:
             self._model = self._init_model(learning_rate, dropout_p)
         
@@ -378,7 +379,7 @@ class DRLAgent:
                 raise ValueError(f'Invalid reward type: {self.reward_type}')
             
     
-    def _DSR(self, Rt, A_tm1, B_tm1, tc, eps: float = np.finfo(float).eps) -> float:
+    def _DSR(self, Rt, A_tm1, B_tm1, tc, eps: float = 1e-6) -> float:
         # Discount the returns by the transaction cost
         Rtd = Rt - tc
         
@@ -387,9 +388,9 @@ class DRLAgent:
         dBt = Rtd ** 2 - B_tm1
 
         num = B_tm1 * dAt - 0.5 * A_tm1 * dBt
-        denom = (B_tm1 - A_tm1 ** 2) ** 1.5 + eps
+        denom = max(B_tm1 - A_tm1 ** 2, 0.0) ** 1.5 + eps
 
-        return num / denom
+        return np.clip(num / denom, -3.0, 3.0).astype(float)
     
     def _PnL(self, Rt, tc: float) -> float:
         # Discount the returns by the transaction cost
@@ -399,7 +400,7 @@ class DRLAgent:
         return np.log1p(Rtd)
 
     
-    def _DDDR(self, Rt, A_tm1, DD_tm1, tc, eps: float=np.finfo(float).eps) -> float:
+    def _DDDR(self, Rt, A_tm1, DD_tm1, tc, eps: float=1e-6) -> float:
         # Compute the Differential Downside Deviation Ratio
         # (as derived in https://doi.org/10.1109/72.935097)
         
@@ -413,33 +414,52 @@ class DRLAgent:
             num = (DD_tm1 ** 2) * (Rtd - 0.5 * A_tm1) - (0.5 * A_tm1 * Rtd ** 2)
             denom = DD_tm1 ** 3 + eps
                 
-        return num / denom
+        return np.clip(num / denom, -3.0, 3.0).astype(float)
     
-    def _init_reward_params(self, Rts: list[float], n: float=1e-4) -> float | None:
+    def _init_reward_params(self, Rts: list[float]) -> float | None:
         # Rts: List of returns to have a hot start for moments.
         # This is necessary for value stabilization
         # Returns any values needed for computing cum. reward and more..
+        eps = 1e-6
         R0 = None
+        
+        # Ensure there are enough data points for initialization
+        if len(Rts) < 2:
+            raise ValueError('Not enough return data points to initialize reward parameters')
+        
+        # Convert Rts to numpy array for easier processing
+        _Rts = np.array(Rts, dtype=np.float32)
         
         match self.reward_type:
             case 'DSR':
-                self._r_eta = n
-                self._r_A_tm1 = 0
-                self._r_B_tm1 = 0
-                for rt in Rts:
-                    self._r_A_tm1 += n * (rt - self._r_A_tm1)
-                    self._r_B_tm1 += n * (rt ** 2 - self._r_B_tm1)
-                    # Compute the initial sharpe ratio. Doesn't account transaction cost
-                R0 = self._r_A_tm1 / ((self._r_B_tm1 - self._r_A_tm1 ** 2) ** 0.5)
+                # Set the Eta using standard EMA formula 2 / (W + 1)
+                self._r_eta = 2 / (self._window_size + 1)
+                
+                # Compute initial moments
+                self._r_A_tm1 = np.mean(_Rts, dtype=float)
+                self._r_B_tm1 = np.mean(_Rts ** 2, dtype=float)
+                    
+                # Compute the initial sharpe ratio.
+                std = max(self._r_B_tm1 - self._r_A_tm1 ** 2, 0.0) ** 0.5
+                R0 = self._r_A_tm1 / (std + eps)
             case 'DDDR':
-                self._r_eta = n
-                self._r_A_tm1 = 0
-                self._r_DD2_tm1 = 0
-                for rt in Rts:
-                    self._r_A_tm1 += n * (rt - self._r_A_tm1)
-                    self._r_DD2_tm1 += n * (min(rt, 0) ** 2 - self._r_DD2_tm1)
-                    # Compute the initial downside deviation ratio. Doesn't account transaction cost
-                R0 = self._r_A_tm1 / (self._r_DD2_tm1 ** 0.5)
+                # Set the Eta using standard EMA formula 2 / (W + 1)
+                self._r_eta = 2 / (self._window_size + 1)
+                
+                # Compute the first moment
+                self._r_A_tm1 = np.mean(_Rts, dtype=float)
+                
+                # Compute the negative returns and its downside deviation
+                n_Rts = _Rts[_Rts < 0]
+                
+                if len(n_Rts) > 0:
+                    self._r_DD2_tm1 = np.mean(n_Rts ** 2, dtype=float)
+                else:
+                    # Fallback if no negative returns in the window
+                    self._r_DD2_tm1 = eps
+                
+                # Compute the initial downside deviation ratio. Doesn't account transaction cost
+                R0 = self._r_A_tm1 / (self._r_DD2_tm1 ** 0.5 + eps)
             
         return R0
         
@@ -854,7 +874,7 @@ class DRLAgent:
 
         # Left axis: training loss
         ax1.plot(x, train_losses, marker='o', linewidth=2, color='tab:blue',
-                label='Train loss (MSE per episode)')
+                label='Train loss')
         ax1.set_xlabel('Episode')
         ax1.set_ylabel('Train loss', color='tab:blue')
         ax1.tick_params(axis='y', labelcolor='tab:blue')
@@ -863,7 +883,7 @@ class DRLAgent:
         # Right axis: validation loss
         ax2 = ax1.twinx()
         ax2.plot(x, val_losses, marker='s', linewidth=2, color='tab:orange',
-                label='Validation loss (−sum reward per episode)')
+                label='Validation loss')
         ax2.set_ylabel('Validation loss', color='tab:orange')
         ax2.tick_params(axis='y', labelcolor='tab:orange')
 
