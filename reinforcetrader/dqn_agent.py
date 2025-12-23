@@ -2,9 +2,9 @@ import os
 
 # Suppress TensorFlow logging for cleaner output
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+import warnings
 
 import json
-import math
 import numpy as np
 from datetime import datetime
 import pandas as pd
@@ -625,7 +625,7 @@ class DRLAgent:
             }
             
         # Plot all the training and validation losses
-        self._plot_losses(train_losses, val_losses, fname=os.path.join(train_config['plots_dir'], 'episode_losses.png'))
+        self._plot_losses(train_losses, val_losses, state_loader, fname=os.path.join(train_config['plots_dir'], 'episode_losses.png'))
         
         # Plot the epsilon decay
         eps_fname = os.path.join(train_config['plots_dir'], 'epsilon_decay.png')
@@ -867,13 +867,35 @@ class DRLAgent:
         else:
             plt.close()
     
-    def _plot_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None, show: bool = True):
-        x = np.arange(1, len(train_losses) + 1)
+    def _plot_losses(self, train_losses, val_losses: list[float], state_loader: EpisodeStateLoader, fname: str | None = None, show: bool = True):
+        if len(train_losses) != len(val_losses):
+            raise ValueError('Train and validation losses must have the same length')
+        
+        # We first need to compute the scaled training and validation losses.
+        # Why? Training windows are expanding, naturally having higher losses.
+        # So, we scale them based on window size to have a fair comparison.
+        # However, this is a naive approach and may not be perfect.
+        train_losses_scaled = []
+        val_losses_scaled = []
+        for i in range(len(train_losses)):
+            train_w_length = state_loader.get_episode_len('train', i)
+            val_w_length = state_loader.get_episode_len('validate', i)
+            
+            # If first episode, reduce the replay start size from training window
+            # as these timesteps are not used for training immediately
+            if i == 0:
+                train_w_length -= self.replay_start_size
+                
+            # Compute the scaled losses
+            train_losses_scaled.append(train_losses[i] / train_w_length)
+            val_losses_scaled.append(val_losses[i] / val_w_length)
 
+        # Create the plot and axes
         fig, ax1 = plt.subplots(figsize=(10, 4))
-
+        x = np.arange(1, len(train_losses) + 1)
+        
         # Left axis: training loss
-        ax1.plot(x, train_losses, marker='o', linewidth=2, color='tab:blue',
+        ax1.plot(x, train_losses_scaled, marker='o', linewidth=2, color='tab:blue',
                 label='Train loss')
         ax1.set_xlabel('Episode')
         ax1.set_ylabel('Train loss', color='tab:blue')
@@ -882,7 +904,7 @@ class DRLAgent:
 
         # Right axis: validation loss
         ax2 = ax1.twinx()
-        ax2.plot(x, val_losses, marker='s', linewidth=2, color='tab:orange',
+        ax2.plot(x, val_losses_scaled, marker='s', linewidth=2, color='tab:orange',
                 label='Validation loss')
         ax2.set_ylabel('Validation loss', color='tab:orange')
         ax2.tick_params(axis='y', labelcolor='tab:orange')
@@ -893,9 +915,9 @@ class DRLAgent:
             l, lab = ax.get_legend_handles_labels()
             lines.extend(l)
             labels.extend(lab)
-        ax1.legend(lines, labels, loc='best')
+        ax1.legend(lines, labels, loc='upper right')
 
-        plt.title('Training Vs. Validation Loss per Episode')
+        plt.title('Training vs. Validation Loss [Scaled by WFV Window Size]')
         fig.tight_layout()
 
         if fname:
@@ -916,9 +938,14 @@ class DRLAgent:
         }
         
         return {'action': action_map[a], 'q_value': q}
-
+    
     def test(self, state_loader: EpisodeStateLoader, episode_id: int, test_config: dict[str, Any]):
-        # NOTE: Assumes no exploration and only exploitation
+        # NOTE: This function is depreciated. Please use Event-Driven backtesting module.
+        warnings.warn(
+            'test() is deprecated as it produces static signals. Use Event-Driven backtesting module instead.',
+                      DeprecationWarning,
+                      stacklevel=2)
+        
         all_tickers = state_loader.get_all_tickers()
 
         # Keep a single ordered list of tickers and parallel lists of series for safe alignment
