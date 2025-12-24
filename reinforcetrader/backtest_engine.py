@@ -20,14 +20,14 @@ class EDBacktester:
     TA_HOLD_IN = 5 # Hold position (in trade)
     TA_HOLD_OUT = 6 # Hold position (out of trade)
     
-    def __init__(self, agent: DRLAgent, state_loader: EpisodeStateLoader, benchmark: str, cash, tc: float=0.25, max_pos:int=5):
+    def __init__(self, agent: DRLAgent, state_loader: EpisodeStateLoader, index: str, cash, tc: float=0.25, max_pos:int=5) -> None:
         self._agent = agent
         self._state_loader = state_loader
 
-        if benchmark == 'SP500':
-            self._benchmark_ticker = '^SPX'
-        elif benchmark == 'DJI':
-            self._benchmark_ticker = '^DJI'
+        if index == 'SP500':
+            self._index_ticker = '^SPX'
+        elif index == 'DJI':
+            self._index_ticker = '^DJI'
         else:
             raise ValueError('Benchmark must be either "SP500" or "DJI".')
         
@@ -53,8 +53,11 @@ class EDBacktester:
         # Benchmark portfolio tracking
         self._universe_prices = None
         self._benchmark_prices = None
+        
+        # Track weather backtest has been run
+        self._backtest_ran = False
 
-    def _init_agent_memory(self, t0):
+    def _init_agent_memory(self, t0) -> None:
         # NOTE: t=t0 is exclusive of the data used to init reward params
         for ticker in self._tickers:
             # Get historical returns from unused data of window for hot start
@@ -157,6 +160,9 @@ class EDBacktester:
         # Note: Truncate dates to account for hot start timestep jump
         self.universe_prices = pd.DataFrame(price_data, index=self.portfolio_history_df.index)
         
+        # Set backtest ran flag
+        self._backtest_ran = True
+        
         return self.portfolio_history_df, self.trade_logs_df
                     
     def _execute_buy(self, ticker, price, date):
@@ -204,3 +210,70 @@ class EDBacktester:
             'trade_proceeds': trade_gross_val - trans_cost_dollars,
             'profit': profit
         })
+    
+    def compute_performance_stats(self) -> pd.DataFrame:
+        # Computes strategy perfomance and other benchmark (index, EWP)
+        
+        if not self._backtest_ran:
+            raise RuntimeError('Backtest must be run before computing performance statistics.')
+        
+        # Compute the strategy returns
+        strat_curve = self.portfolio_history_df['portfolio_value']
+        strat_returns = strat_curve.pct_change().fillna(0.0)
+        
+        # Get index data for comparison
+        start_date = strat_curve.index[0] - DateOffset(days=5)
+        end_date = strat_curve.index[-1]
+        index_data_loader = RawDataLoader(start_date=start_date, end_date=end_date, tickers=[self._index_ticker], verbose=False)
+        index_df, _ = index_data_loader.get_hist_prices()
+        index_curve = index_df['Close'].reindex(strat_curve.index)
+        index_returns = index_curve.pct_change().fillna(0.0)
+        
+        # Compute Equal-Weighted Portfolio (EWP) returns
+        ewp_returns = self.universe_prices.pct_change().mean(axis=1)
+        ewp_curve = (1 + ewp_returns).cumprod() * self._cash_balance
+        
+        def get_curve_metrics(name, prices, returns):
+            total_returns = (prices.iloc[-1] / prices.iloc[0]) - 1
+            days = len(prices)
+            ann_returns = (1 + total_returns) ** (252 / days) - 1
+            
+            # Compute the maximum drawdown
+            rolling_max = prices.cummax()
+            drawdown = (prices / rolling_max) - 1
+            max_dd = drawdown.min()
+            
+            # Compute the Sharpe Ratio
+            sigma = returns.std() * np.sqrt(252)
+            sharpe = (returns.mean() * 252) / sigma
+            
+            # Compute the Sortino Ratio
+            downside_returns = returns[returns < 0]
+            down_sigma = downside_returns.std() * np.sqrt(252)
+            sortino = (returns.mean() * 252) / down_sigma
+            
+            return {
+                'Strategy': name,
+                'Total Return': f"{total_returns*100:.2f}%",
+                'Ann. Return': f"{ann_returns*100:.2f}%",
+                'Max Drawdown': f"{max_dd*100:.2f}%",
+                'Sharpe': round(sharpe, 3),
+                'Sortino': round(sortino, 3)
+            }
+        
+        # Compile stats for DRL strategy, and other benchmarks
+        perf_stats = []
+        perf_stats.append(get_curve_metrics('DRL Strategy', strat_curve, strat_returns))
+        perf_stats.append(get_curve_metrics('Index (Buy and Hold)', index_curve, index_returns))
+        perf_stats.append(get_curve_metrics('EWP (Daily; No Trans Cost)', ewp_curve, ewp_returns))
+        
+        self.perf_stats_df = pd.DataFrame(perf_stats).set_index('Strategy')
+        
+        # Store curves for plotting
+        self.curves = pd.DataFrame({
+            'DRL Strategy': strat_curve,
+            'Index': index_curve,
+            'EWP': ewp_curve
+        })
+        
+        return self.perf_stats_df
