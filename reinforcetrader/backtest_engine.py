@@ -118,8 +118,12 @@ class EDBacktester:
             for req in buy_requests:
                 # NOTE: Relies on assumption that IN_TRADE/OUT_TRADE being 1/0
                 active_pos_count = sum(self._current_positions.values())
-                if min(self._cash_balance, self._pos_size_limit) >= req['price'] and active_pos_count < self._max_pos:
-                    self._execute_buy(req['ticker'], req['price'], curr_date)
+                
+                success = False
+                if active_pos_count < self._max_pos:
+                    success = self._execute_buy(req['ticker'], req['price'], curr_date) 
+                    
+                if success:
                     ticker_action[req['ticker']] = self.TA_EXECUTED_BUY
                 else:
                     ticker_action[req['ticker']] = self.TA_REJECTED_BUY
@@ -129,15 +133,15 @@ class EDBacktester:
                 outcome = ticker_action[ticker]
                 curr_pos = self._agent.IN_TRADE if outcome in {self.TA_EXECUTED_BUY, self.TA_HOLD_IN} else self._agent.OUT_TRADE
                 if curr_pos == self._agent.IN_TRADE:
-                    Rt = self._state_loader.get_reward_computes('test', 0, ticker, t)['1DFRet']
+                    fRt = self._state_loader.get_reward_computes('test', 0, ticker, t)['1DFRet']
                 else:
-                    Rt = 0.0  # No return when out of trade
+                    fRt = 0.0  # No return when out of trade
                 
                 # Load the reward params back to agent and update
                 # WARNING: Could introduce floating precision issues over long runs
                 # but, betting on the fact that they are negligible for practical purposes
                 self._agent._set_reward_computes(self._agent_reward_states[ticker])
-                self._agent_reward_states[ticker] = self._agent._update_reward_computes(Rt)
+                self._agent_reward_states[ticker] = self._agent._update_reward_computes(fRt)
             
             # Compute portfolio value at end of day
             portfolio_value = self._cash_balance
@@ -145,6 +149,9 @@ class EDBacktester:
                 if num_shares > 0:
                     asset_price = self._state_loader.get_state_OHLCV('test', 0, p_ticker, t)['Close']
                     portfolio_value += num_shares * asset_price
+            
+            # Recacalculate position size limit based on updated cash balance
+            self._pos_size_limit = portfolio_value / self._max_pos
             
             # Log portfolio state into history
             self._portfolio_history.append({
@@ -167,14 +174,15 @@ class EDBacktester:
         
         return self.portfolio_history_df, self.trade_logs_df
                     
-    def _execute_buy(self, ticker, price, date):
-        shares = min(self._pos_size_limit, self._cash_balance) // price
+    def _execute_buy(self, ticker, price, date) -> bool:
+        # Compute the effective price including transaction cost
+        eff_price = price * (1 + (self._trans_cost / 100))
+        shares = min(self._pos_size_limit, self._cash_balance) // eff_price
         if shares <= 0:
-            raise ValueError(f'Insufficient cash or position limit to buy shares of {ticker} at price {price:.2f}')
+            return False  # Not enough cash to buy any shares
         
         # Calculate transaction cost, new cash balance, and update holdings
-        trans_cost_dollars = shares * price * self._trans_cost / 100
-        trade_cost = (shares * price) + trans_cost_dollars
+        trade_cost = shares * eff_price
         self._cash_balance -= trade_cost
         self._shares_held[ticker] = shares
         self._entry_prices[ticker] = price
@@ -189,6 +197,8 @@ class EDBacktester:
             'shares': shares,
             'trade_cost': trade_cost
         })
+        
+        return True
         
     def _execute_sell(self, ticker, price, date):
         shares = self._shares_held[ticker]
@@ -285,7 +295,7 @@ class EDBacktester:
         if not hasattr(self, 'curves'):
             self.compute_performance_stats()
             
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1]})
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]})
         
         # First plot: Equity Curves
         self.curves.plot(ax=ax1, linewidth=2)
@@ -308,7 +318,7 @@ class EDBacktester:
         ax2.set_ylabel('Drawdown (%)')
         ax2.fill_between(self.curves.index, 0, strategy_dd, color='red', alpha=0.05)
         ax2.set_ylim(0, global_max_dd * 1.05)
-        ax2.legend()
+        ax2.legend(loc='lower right')
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
