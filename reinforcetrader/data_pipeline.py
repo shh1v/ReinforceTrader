@@ -19,7 +19,7 @@ class RawDataLoader:
 
         # Make sure there is no conflict between tickers and index
         if tickers and index:
-            raise ValueError('Tickers and index cannot be provided simultaneously.')
+            raise ValueError('Tickers and index both cannot be provided.')
         elif not tickers and not index:
             raise ValueError('Either tickers or index must be provided.')
         
@@ -28,18 +28,21 @@ class RawDataLoader:
             # Prefer loading from cache to avoid API calls
             load_from_cache = True
             tickers = self._fetch_tickers(index=self._index)
-            benchmark_ticker = '^DJI' if index == 'DJI' else '^SPX'
+            if index == 'DJI':
+                yf_bench_ticker = '^DJI'
+            elif index == 'SP500':
+                yf_bench_ticker = '^SPX'
+            else:
+                raise ValueError('Invalid index: {index}')
         else:
             # Only load from cache if tickers are fetched from index
             load_from_cache = False
-            benchmark_ticker = None
-            
-            
+            yf_bench_ticker = None
 
         # Load all the ticker price and volume data
         self._ticker_data = self._load_hist_prices(tickers, load_from_cache=load_from_cache)
-        if benchmark_ticker:
-            self._benchmark_data = self._download_hist_prices([benchmark_ticker], save=False)
+        if yf_bench_ticker:
+            self._benchmark_data = self._download_hist_prices([yf_bench_ticker], save=False)
         else:
             self._benchmark_data = None
             
