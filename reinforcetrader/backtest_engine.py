@@ -277,3 +277,30 @@ class EDBacktester:
         })
         
         return self.perf_stats_df
+
+    def plot_curves(self):
+        if not hasattr(self, 'curves'):
+            self.compute_performance_stats()
+            
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [2, 1]})
+        
+        # First plot: Equity Curves
+        self.curves.plot(ax=ax1, linewidth=2)
+        ax1.set_title(f'Equity Curve Comparison (Init. Capital: ${self._cash_balance:,.0f})')
+        ax1.set_ylabel('Portfolio Value ($)')
+        ax1.grid(True, alpha=0.3)
+        
+        # Second plot: Drawdowns
+        for col in self.curves.columns:
+            series = self.curves[col]
+            dd = (series / series.cummax()) - 1
+            ax2.plot(dd, label=col, linewidth=1.5)
+            
+        ax2.set_title('Drawdowns')
+        ax2.set_ylabel('Drawdown (%)')
+        ax2.fill_between(self.curves.index, 0, -1, color='red', alpha=0.05)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
