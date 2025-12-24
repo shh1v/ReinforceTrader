@@ -3,7 +3,6 @@ import pandas as pd
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from pandas.tseries.offsets import DateOffset
-from collections import defaultdict
 
 # Local imports for class dependencies
 from .dqn_agent import DRLAgent
@@ -32,6 +31,7 @@ class EDBacktester:
             raise ValueError('Benchmark must be either "SP500" or "DJI".')
         
         # Set portfolio constraints
+        self._initial_cash = cash
         self._cash_balance = cash
         self._trans_cost = tc # NOTE: Transaction cost in percentage (e.g., 0.25 for 0.25%)
         self._max_pos = max_pos
@@ -78,7 +78,7 @@ class EDBacktester:
         self._init_agent_memory(t0)
         
         # Collect price data for benchmarking later
-        price_data = defaultdict(list[float])
+        price_data = {}
         
         print(f'Starting Event-Driven Backtest. Initial Cash Balance: {self._cash_balance:.2f}; Max Positions: {self._max_pos}')
         
@@ -92,6 +92,8 @@ class EDBacktester:
             for ticker in self._tickers:
                 # Capture current prices for benchmark calculation
                 curr_price = self._state_loader.get_state_OHLCV('test', 0, ticker, t)['Close']
+                if ticker not in price_data:
+                    price_data[ticker] = []
                 price_data[ticker].append(curr_price)
                 
                 # Get current state and position
@@ -195,7 +197,7 @@ class EDBacktester:
             raise ValueError(f'No shares held to sell for ticker {ticker}.')
         trade_gross_val = shares * price
         trans_cost_dollars = trade_gross_val * self._trans_cost / 100
-        buy_cost = shares * entry_price * (1 + self._trans_cost) / 100
+        buy_cost = shares * entry_price * (1 + (self._trans_cost/100))
         profit = trade_gross_val - trans_cost_dollars - buy_cost
         self._cash_balance += trade_gross_val - trans_cost_dollars
         self._shares_held[ticker] = 0
@@ -226,12 +228,13 @@ class EDBacktester:
         end_date = strat_curve.index[-1]
         index_data_loader = RawDataLoader(start_date=start_date, end_date=end_date, tickers=[self._index_ticker], verbose=False)
         index_df, _ = index_data_loader.get_hist_prices()
-        index_curve = index_df['Close'].reindex(strat_curve.index)
-        index_returns = index_curve.pct_change().fillna(0.0)
+        index_close = index_df['Close'].reindex(strat_curve.index)
+        index_returns = index_close.pct_change().fillna(0.0)
+        index_curve = (1 + index_returns).cumprod() * self._initial_cash
         
         # Compute Equal-Weighted Portfolio (EWP) returns
         ewp_returns = self.universe_prices.pct_change().mean(axis=1)
-        ewp_curve = (1 + ewp_returns).cumprod() * self._cash_balance
+        ewp_curve = (1 + ewp_returns).cumprod() * self._initial_cash
         
         def get_curve_metrics(name, prices, returns):
             total_returns = (prices.iloc[-1] / prices.iloc[0]) - 1
@@ -282,23 +285,29 @@ class EDBacktester:
         if not hasattr(self, 'curves'):
             self.compute_performance_stats()
             
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [2, 1]})
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1]})
         
         # First plot: Equity Curves
         self.curves.plot(ax=ax1, linewidth=2)
-        ax1.set_title(f'Equity Curve Comparison (Init. Capital: ${self._cash_balance:,.0f})')
+        ax1.set_title(f'Equity Curve Comparison (Init. Capital: ${self._initial_cash:,.0f})')
         ax1.set_ylabel('Portfolio Value ($)')
         ax1.grid(True, alpha=0.3)
         
         # Second plot: Drawdowns
+        strategy_dd = None
+        global_max_dd = 0.0
         for col in self.curves.columns:
             series = self.curves[col]
             dd = (series / series.cummax()) - 1
+            if col == 'DRL Strategy':
+                strategy_dd = dd
+            global_max_dd = min(global_max_dd, dd.min())
             ax2.plot(dd, label=col, linewidth=1.5)
             
         ax2.set_title('Drawdowns')
         ax2.set_ylabel('Drawdown (%)')
-        ax2.fill_between(self.curves.index, 0, -1, color='red', alpha=0.05)
+        ax2.fill_between(self.curves.index, 0, strategy_dd, color='red', alpha=0.05)
+        ax2.set_ylim(0, global_max_dd * 1.05)
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
