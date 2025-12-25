@@ -252,7 +252,7 @@ class EDBacktester:
         index_curve = (1 + index_returns).cumprod() * self._initial_cash
         
         # Compute Equal-Weighted Portfolio (EWP) returns
-        ewp_returns = self.universe_prices.pct_change().mean(axis=1)
+        ewp_returns = self.universe_prices.pct_change().mean(axis=1).fillna(0.0)
         ewp_curve = (1 + ewp_returns).cumprod() * self._initial_cash
         
         def get_curve_metrics(name, prices, returns):
@@ -313,9 +313,9 @@ class EDBacktester:
                                              (self.trade_logs_df['ticker'] == ticker) &
                                              (self.trade_logs_df['action'] == 'BUY')]
         
-        trade_exits = self.trade_logs_df.loc[(self.trade_logs_df['date'] >= buy_date) &
+        trade_exits = self.trade_logs_df.loc[(self.trade_logs_df['date'] > buy_date) &
                                              (self.trade_logs_df['ticker'] == ticker) &
-                                             (self.trade_logs_df['action'] == 'BUY')]
+                                             (self.trade_logs_df['action'] == 'SELL')]
         
         # Some check for ensuring a long/close position was taken
         if trade_entry.empty:
