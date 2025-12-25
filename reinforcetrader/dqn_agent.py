@@ -2,9 +2,9 @@ import os
 
 # Suppress TensorFlow logging for cleaner output
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+import warnings
 
 import json
-import math
 import numpy as np
 from datetime import datetime
 import pandas as pd
@@ -242,15 +242,6 @@ class DRLAgent:
         q_values = self._get_q_values(state_matrix, all_reward_params) + self._get_mask(trade_pos) # type: ignore
         action = int(tf.argmax(q_values[0], axis=-1, output_type=tf.int32).numpy())
         
-        # # Check if softmax output is requested
-        # # WARNING: Softmax q outputs the confidence. When compared across tickers,
-        # # it shows the 'actions' confidence for that action.
-        # # NOTE: The action with highest q value is choosen, even though it may have low confidence.
-        # if softmax:
-        #     pred_q_exp = tf.exp(q_values - tf.reduce_max(q_values))
-        #     soft_pred_q = pred_q_exp / tf.reduce_sum(pred_q_exp)
-        #     return (action, soft_pred_q.numpy()[0, action])
-        
         pred_q_value = float(q_values[0, action])
         return (action, pred_q_value)
 
@@ -472,6 +463,20 @@ class DRLAgent:
             case _:
                 return {}
     
+    def _set_reward_computes(self, params: dict[str, float]) -> None:
+        # WARNING: This method is dangerous to use as it can desynchronize
+        # the reward compute variables from the actual returns seen so far.
+        # Use with caution.
+        match self.reward_type:
+            case 'DSR':
+                self._r_A_tm1 = params['A_tm1']
+                self._r_B_tm1 = params['B_tm1']
+            case 'DDDR':
+                self._r_A_tm1 = params['A_tm1']
+                self._r_DD2_tm1 = params['DD_tm1'] ** 2
+            case _:
+                pass
+    
     def _update_reward_computes(self, Rt) -> dict[str, float]:
         match self.reward_type:
             case 'DSR':
@@ -524,7 +529,7 @@ class DRLAgent:
             # Iterate tickers, training sequentially
             for ti, ticker in enumerate(tqdm(all_tickers, desc=f'Training episode {e}', ncols=100)):
 
-                state = state_loader.get_state_matrix('train', e, ticker, t0, self._window_size)
+                curr_state = state_loader.get_state_matrix('train', e, ticker, t0, self._window_size)
                 prev_pos = DRLAgent.OUT_TRADE
                 
                 # Initalize the reward computes for the ticker
@@ -544,7 +549,7 @@ class DRLAgent:
                     # NOTE: Here, extra features are some computes that are used
                     # to compute the reward. To make a valid MDP, there variables
                     # are included in the state representation
-                    action, _ = self._act(state, prev_pos, curr_ef)
+                    action, _ = self._act(curr_state, prev_pos, curr_ef)
                     
                     # Compute the current trade position based on new action
                     if prev_pos == DRLAgent.OUT_TRADE and action == DRLAgent.A_BUY:
@@ -570,7 +575,7 @@ class DRLAgent:
                     next_ef = list(self._update_reward_computes(Rt).values())
                     
                     # store transition
-                    self._memory.append((state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos))
+                    self._memory.append((curr_state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos))
 
                     # Update env steps taken
                     env_steps += 1
@@ -587,7 +592,7 @@ class DRLAgent:
                                 self._epsilon *= self._epsilon_decay
                     
                     # Advance to the next state
-                    state = next_state
+                    curr_state = next_state
                     prev_pos = curr_pos
 
             # Plot reward diagostics
@@ -625,7 +630,7 @@ class DRLAgent:
             }
             
         # Plot all the training and validation losses
-        self._plot_losses(train_losses, val_losses, fname=os.path.join(train_config['plots_dir'], 'episode_losses.png'))
+        self._plot_losses(train_losses, val_losses, state_loader, fname=os.path.join(train_config['plots_dir'], 'episode_losses.png'))
         
         # Plot the epsilon decay
         eps_fname = os.path.join(train_config['plots_dir'], 'epsilon_decay.png')
@@ -745,7 +750,7 @@ class DRLAgent:
         
         for ticker in tickers:
             t0 = self._window_size - 1
-            state = state_loader.get_state_matrix('validate', episode_id, ticker, t0, self._window_size)
+            curr_state = state_loader.get_state_matrix('validate', episode_id, ticker, t0, self._window_size)
             prev_pos = DRLAgent.OUT_TRADE
             entry_price = None
 
@@ -762,7 +767,7 @@ class DRLAgent:
                 curr_ef = list(reward_computes.values())
                 
                 # training=False turns off exploration
-                action, _ = self._act(state, prev_pos, curr_ef, training=False)
+                action, _ = self._act(curr_state, prev_pos, curr_ef, training=False)
                 curr_price = state_loader.get_state_OHLCV('validate', episode_id, ticker, t)['Close']
                 
                 # Compute the current trade position based on new action
@@ -822,10 +827,10 @@ class DRLAgent:
                 next_ef = list(self._update_reward_computes(Rt).values())
                 
                 # Compute the validation error/loss
-                total_loss += self._compute_loss(state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos)
+                total_loss += self._compute_loss(curr_state, curr_ef, prev_pos, action, reward, next_state, next_ef, curr_pos)
                 
                 # Advance to the next state
-                state =  next_state
+                curr_state =  next_state
                 prev_pos = curr_pos
 
         # WARNING: Metrics consider forcefully ended trades which could skew performance
@@ -867,13 +872,35 @@ class DRLAgent:
         else:
             plt.close()
     
-    def _plot_losses(self, train_losses: list[float], val_losses: list[float], fname: str | None = None, show: bool = True):
-        x = np.arange(1, len(train_losses) + 1)
+    def _plot_losses(self, train_losses, val_losses: list[float], state_loader: EpisodeStateLoader, fname: str | None = None, show: bool = True):
+        if len(train_losses) != len(val_losses):
+            raise ValueError('Train and validation losses must have the same length')
+        
+        # We first need to compute the scaled training and validation losses.
+        # Why? Training windows are expanding, naturally having higher losses.
+        # So, we scale them based on window size to have a fair comparison.
+        # However, this is a naive approach and may not be perfect.
+        train_losses_scaled = []
+        val_losses_scaled = []
+        for i in range(len(train_losses)):
+            train_w_length = state_loader.get_episode_len('train', i)
+            val_w_length = state_loader.get_episode_len('validate', i)
+            
+            # If first episode, reduce the replay start size from training window
+            # as these timesteps are not used for training immediately
+            if i == 0:
+                train_w_length -= self.replay_start_size
+                
+            # Compute the scaled losses
+            train_losses_scaled.append(train_losses[i] / train_w_length)
+            val_losses_scaled.append(val_losses[i] / val_w_length)
 
+        # Create the plot and axes
         fig, ax1 = plt.subplots(figsize=(10, 4))
-
+        x = np.arange(1, len(train_losses) + 1)
+        
         # Left axis: training loss
-        ax1.plot(x, train_losses, marker='o', linewidth=2, color='tab:blue',
+        ax1.plot(x, train_losses_scaled, marker='o', linewidth=2, color='tab:blue',
                 label='Train loss')
         ax1.set_xlabel('Episode')
         ax1.set_ylabel('Train loss', color='tab:blue')
@@ -882,7 +909,7 @@ class DRLAgent:
 
         # Right axis: validation loss
         ax2 = ax1.twinx()
-        ax2.plot(x, val_losses, marker='s', linewidth=2, color='tab:orange',
+        ax2.plot(x, val_losses_scaled, marker='s', linewidth=2, color='tab:orange',
                 label='Validation loss')
         ax2.set_ylabel('Validation loss', color='tab:orange')
         ax2.tick_params(axis='y', labelcolor='tab:orange')
@@ -893,9 +920,9 @@ class DRLAgent:
             l, lab = ax.get_legend_handles_labels()
             lines.extend(l)
             labels.extend(lab)
-        ax1.legend(lines, labels, loc='best')
+        ax1.legend(lines, labels, loc='upper right')
 
-        plt.title('Training Vs. Validation Loss per Episode')
+        plt.title('Training vs. Validation Loss [Scaled by WFV Window Size]')
         fig.tight_layout()
 
         if fname:
@@ -916,9 +943,14 @@ class DRLAgent:
         }
         
         return {'action': action_map[a], 'q_value': q}
-
+    
     def test(self, state_loader: EpisodeStateLoader, episode_id: int, test_config: dict[str, Any]):
-        # NOTE: Assumes no exploration and only exploitation
+        # NOTE: This function is depreciated. Please use Event-Driven backtesting module.
+        warnings.warn(
+            'test() is deprecated as it produces static signals. Use Event-Driven backtesting module instead.',
+                      DeprecationWarning,
+                      stacklevel=2)
+        
         all_tickers = state_loader.get_all_tickers()
 
         # Keep a single ordered list of tickers and parallel lists of series for safe alignment
@@ -941,7 +973,7 @@ class DRLAgent:
             Rts = [state_loader.get_reward_computes('test', episode_id, ticker, i)['1DFRet'] for i in range(t0)]
             self._init_reward_params(Rts)
             
-            state = state_loader.get_state_matrix('test', episode_id, ticker, t0, self._window_size)
+            curr_state = state_loader.get_state_matrix('test', episode_id, ticker, t0, self._window_size)
             prev_pos = DRLAgent.OUT_TRADE
 
             # Allocate containers (length L to match idx)
@@ -960,7 +992,7 @@ class DRLAgent:
                 close_px[t] = curr_close
 
                 # Derive action based on greedy policy
-                action, soft_q = self._act(state, prev_pos, curr_ef, training=False)
+                action, soft_q = self._act(curr_state, prev_pos, curr_ef, training=False)
                 sig_cells[t] = self._get_predict_dict(action, soft_q) # type: ignore
 
                 # Compute the current trade position based on new action
@@ -978,7 +1010,7 @@ class DRLAgent:
                 
                 # Advance to the next state and update prev_pos
                 next_state = state_loader.get_state_matrix('test', episode_id, ticker, t + 1, self._window_size)
-                state = next_state
+                curr_state = next_state
                 prev_pos = curr_pos
 
             # Final row (t = L-1): record price; no new decision possible so force hold-out or sell
