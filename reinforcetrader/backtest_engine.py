@@ -335,7 +335,7 @@ class EDBacktester:
         buy_reward_computes = self._agent_reward_states[buy_t][ticker]
         
         if exit:
-            sell_date = trade_exit['date']
+            sell_date = pd.Timestamp(trade_exit['date'])
             sell_t = self._test_dates.get_loc(sell_date)
             sell_t = sell_t.start if isinstance(sell_t, slice) else int(sell_t)     
             sell_state = self._state_loader.get_state_matrix('test', 0, ticker, sell_t, self._agent._window_size)   
@@ -345,7 +345,7 @@ class EDBacktester:
             sell_reward_computes = dict()
 
         # Plot the price action with buy/sell markers
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(8, 4))
         
         # Get price series for the ticker
         plot_start_date = buy_date - pd.Timedelta(days=self._agent._window_size - 1)
@@ -354,11 +354,31 @@ class EDBacktester:
         
         
         # Plot the price series and buy/sell markers
-        plt.plot(price_series, label=f'{ticker} Price', color='blue')
-        plt.plot(price_series.loc[buy_date], marker='^', color='green', markersize=12, label='Agent Buy', linestyle='None')
+        plt.plot(price_series, label=f'{ticker} Price', color='black')
+        buy_point = price_series.loc[price_series.index == buy_date]
+        plt.plot(buy_point, marker='^', color='green', markersize=12, label='Agent Buy', linestyle='None')
         if exit:
-            plt.plot(price_series.loc[sell_date], marker='v', color='red', markersize=12, label='Agent Sell', linestyle='None')
-        
+            sell_point = price_series.loc[price_series.index == sell_date]
+            plt.plot(sell_point, marker='v', color='red', markersize=12, label='Agent Sell', linestyle='None')
+            
+            # Also plot other trade metrics (like duration, profit, etc.)
+            trade_duration = (sell_date - buy_date).days # type: ignore
+            trade_profit = trade_exit['net_profit']
+            stats_text = (f'Trade Duration: {trade_duration} days\n'
+                          f'Net Profit: ${trade_profit:,.2f}')
+            
+            # Add Text Box onto the plot
+            ax.text(0.02, 0.95, stats_text, 
+                    transform=ax.transAxes, 
+                    fontsize=8, 
+                    verticalalignment='top', 
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+            
+        plt.title(f'Trade Scenario for {ticker}: Buy on {buy_date.date()}' + (f', Sell on {sell_date.date()}' if exit else ''))
+        plt.xlabel('Date')
+        plt.ylabel('Price ($)')
+        plt.legend(loc='best')
+        plt.grid(True, alpha=0.3)
         
         # Prepare buy/sell states dfs (i.e., with feature names)
         buy_state_df = pd.DataFrame(buy_state, columns=FeatureBuilder.STATE_FEATURES)
