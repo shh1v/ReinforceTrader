@@ -2,12 +2,13 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from pandas.tseries.offsets import DateOffset
 
 # Local imports for class dependencies
 from .dqn_agent import DRLAgent
 from .state import EpisodeStateLoader
-from .data_pipeline import RawDataLoader
+from .data_pipeline import RawDataLoader, FeatureBuilder
 
 
 class EDBacktester:
@@ -44,7 +45,7 @@ class EDBacktester:
         self._shares_held = {ticker: 0 for ticker in self._tickers}
         
         # Container for reward params used in state represention
-        self._agent_reward_states = {}
+        self._agent_reward_states: dict[int, dict[str, dict[str, float]]] = {}
         
         # Strategy portfolio logging
         self._portfolio_history = []
@@ -59,6 +60,7 @@ class EDBacktester:
 
     def _init_agent_memory(self, t0) -> None:
         # NOTE: t=t0 is exclusive of the data used to init reward params
+        self._agent_reward_states[t0] = {}
         for ticker in self._tickers:
             # Get historical returns from unused data of window for hot start
             Rts = [self._state_loader.get_reward_computes('test', 0, ticker, i)['1DFRet'] 
@@ -66,13 +68,13 @@ class EDBacktester:
             # Init reward params and store for ticker
             # Bloated way of doing this, but avoids changing agent interface
             self._agent._init_reward_params(Rts)
-            self._agent_reward_states[ticker] = self._agent._get_reward_computes()
+            self._agent_reward_states[t0][ticker] = self._agent._get_reward_computes()
     
     def run_backtest(self) -> tuple[pd.DataFrame, pd.DataFrame]:
         # Get test window parameters
         L = self._state_loader.get_episode_len('test', 0)
         t0 = self._agent._window_size - 1
-        dates = self._state_loader.get_test_dates(0)
+        self._test_dates = self._state_loader.get_test_dates(0)
         
         # Initialize agent reward parameters
         self._init_agent_memory(t0)
@@ -83,11 +85,14 @@ class EDBacktester:
         print(f'Starting Event-Driven Backtest. Initial Cash Balance: {self._cash_balance:.2f}; Max Positions: {self._max_pos}')
         
         for t in tqdm(range(t0, L-1), desc='Trading Days'):
-            curr_date = dates[t]
+            curr_date = self._test_dates[t]
             
             # For each timestep, iterate through all tickers
             buy_requests = []
             ticker_action = {}
+            
+            # Create reward state container for next timestep
+            self._agent_reward_states[t+1] = {}
             
             for ticker in self._tickers:
                 # Capture current prices for benchmark calculation
@@ -99,7 +104,7 @@ class EDBacktester:
                 # Get current state and position
                 curr_state = self._state_loader.get_state_matrix('test', 0, ticker, t, self._agent._window_size)
                 prev_pos = self._current_positions[ticker]
-                curr_ef = list(self._agent_reward_states[ticker].values())
+                curr_ef = list(self._agent_reward_states[t][ticker].values())
                 
                 action, q_value = self._agent._act(curr_state, prev_pos, curr_ef, training=False)
                 
@@ -107,7 +112,8 @@ class EDBacktester:
                     buy_requests.append({'ticker': ticker, 'price': curr_price, 'q_value': q_value})
                     ticker_action[ticker] = self.TA_REQUEST_BUY
                 elif prev_pos == self._agent.IN_TRADE and action == self._agent.A_SELL:
-                    self._execute_sell(ticker, curr_price, curr_date)
+                    if not self._execute_sell(ticker, curr_price, t):
+                        raise RuntimeError(f'Sell execution failed for ticker {ticker} on date {curr_date}.')
                     ticker_action[ticker] = self.TA_EXECUTE_SELL
                 else:
                     ticker_action[ticker] = self.TA_HOLD_IN if prev_pos == self._agent.IN_TRADE else self.TA_HOLD_OUT
@@ -121,7 +127,7 @@ class EDBacktester:
                 
                 success = False
                 if active_pos_count < self._max_pos:
-                    success = self._execute_buy(req['ticker'], req['price'], curr_date) 
+                    success = self._execute_buy(req['ticker'], req['price'], t) 
                     
                 if success:
                     ticker_action[req['ticker']] = self.TA_EXECUTED_BUY
@@ -140,8 +146,8 @@ class EDBacktester:
                 # Load the reward params back to agent and update
                 # WARNING: Could introduce floating precision issues over long runs
                 # but, betting on the fact that they are negligible for practical purposes
-                self._agent._set_reward_computes(self._agent_reward_states[ticker])
-                self._agent_reward_states[ticker] = self._agent._update_reward_computes(fRt)
+                self._agent._set_reward_computes(self._agent_reward_states[t][ticker])
+                self._agent_reward_states[t+1][ticker] = self._agent._update_reward_computes(fRt)
             
             # Compute portfolio value at end of day
             portfolio_value = self._cash_balance
@@ -174,7 +180,7 @@ class EDBacktester:
         
         return self.portfolio_history_df, self.trade_logs_df
                     
-    def _execute_buy(self, ticker, price, date) -> bool:
+    def _execute_buy(self, ticker: str, price: float, t: int) -> bool:
         # Compute the effective price including transaction cost
         eff_price = price * (1 + (self._trans_cost / 100))
         shares = min(self._pos_size_limit, self._cash_balance) // eff_price
@@ -190,21 +196,22 @@ class EDBacktester:
         
         # Append the transaction to trade logs
         self._trade_logs.append({
-            'date': date,
+            'date': self._test_dates[t],
             'ticker': ticker,
             'action': 'BUY',
             'price': price,
             'shares': shares,
-            'trade_cost': trade_cost
+            'cash_flow': -trade_cost
         })
         
         return True
         
-    def _execute_sell(self, ticker, price, date):
+    def _execute_sell(self, ticker: str, price: float, t: int) -> bool:
         shares = self._shares_held[ticker]
         entry_price = self._entry_prices[ticker]
         if shares <= 0:
-            raise ValueError(f'No shares held to sell for ticker {ticker}.')
+            return False # Should not happen, but in case of logic error
+        
         trade_gross_val = shares * price
         trans_cost_dollars = trade_gross_val * self._trans_cost / 100
         buy_cost = shares * entry_price * (1 + (self._trans_cost/100))
@@ -214,14 +221,16 @@ class EDBacktester:
         self._current_positions[ticker] = self._agent.OUT_TRADE
 
         self._trade_logs.append({
-            'date': date,
+            'date': self._test_dates[t],
             'ticker': ticker,
             'action': 'SELL',
             'price': price,
             'shares': shares,
-            'trade_proceeds': trade_gross_val - trans_cost_dollars,
-            'profit': profit
+            'cash_flow': trade_gross_val - trans_cost_dollars,
+            'net_profit': profit
         })
+        
+        return True
     
     def compute_performance_stats(self) -> pd.DataFrame:
         # Computes strategy perfomance and other benchmark (index, EWP)
@@ -285,12 +294,83 @@ class EDBacktester:
         # Store curves for plotting
         self.curves = pd.DataFrame({
             'DRL Strategy': strat_curve,
-            'Index': index_curve,
-            'EWP': ewp_curve
+            'Index (Buy and Hold)': index_curve,
+            'EWP (Daily; No Trans Cost)': ewp_curve
         })
         
         return self.perf_stats_df
+    
+    def get_trade_scenario(self, buy_date: pd.Timestamp, ticker: str,) -> tuple[pd.DataFrame,
+                                                                                dict[str, float],
+                                                                                pd.DataFrame,
+                                                                                dict[str, float]]:
+        # method to extract trade scenario for given trade
+        # Returns the state matrix, reward computes, and plots buy sell action
+        if not self._backtest_ran:
+            raise RuntimeError('Backtest must be run before running trade scenrios.')
+        
+        trade_entry = self.trade_logs_df.loc[(self.trade_logs_df['date'] == buy_date) &
+                                             (self.trade_logs_df['ticker'] == ticker) &
+                                             (self.trade_logs_df['action'] == 'BUY')]
+        
+        trade_exits = self.trade_logs_df.loc[(self.trade_logs_df['date'] >= buy_date) &
+                                             (self.trade_logs_df['ticker'] == ticker) &
+                                             (self.trade_logs_df['action'] == 'BUY')]
+        
+        # Some check for ensuring a long/close position was taken
+        if trade_entry.empty:
+            raise ValueError(f'BUY trade not found for ticker {ticker} at {buy_date}.')
+        elif trade_exits.empty:
+            print(f'No SELL trade found for ticker {ticker} after {buy_date}. Simulating without an exit.')
+            exit = False
+        else:
+            trade_exit = trade_exits.iloc[0]
+            exit = True
+            
+        # Get the states and reward computes at trade times
+        # Get the buy/sell dates
+        buy_t = self._test_dates.get_loc(buy_date)
+        buy_t = buy_t.start if isinstance(buy_t, slice) else int(buy_t)
+        buy_state = self._state_loader.get_state_matrix('test', 0, ticker, buy_t, self._agent._window_size)
+        buy_reward_computes = self._agent_reward_states[buy_t][ticker]
+        
+        if exit:
+            sell_date = trade_exit['date']
+            sell_t = self._test_dates.get_loc(sell_date)
+            sell_t = sell_t.start if isinstance(sell_t, slice) else int(sell_t)     
+            sell_state = self._state_loader.get_state_matrix('test', 0, ticker, sell_t, self._agent._window_size)   
+            sell_reward_computes = self._agent_reward_states[sell_t][ticker]
+        else:
+            sell_state = pd.DataFrame()
+            sell_reward_computes = dict()
 
+        # Plot the price action with buy/sell markers
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Get price series for the ticker
+        plot_start_date = buy_date - pd.Timedelta(days=self._agent._window_size - 1)
+        plot_end_date = sell_date + pd.Timedelta(days=10) if exit else buy_date + pd.Timedelta(days=30)
+        price_series = self.universe_prices[ticker].loc[plot_start_date : plot_end_date]
+        
+        
+        # Plot the price series and buy/sell markers
+        plt.plot(price_series, label=f'{ticker} Price', color='blue')
+        plt.plot(price_series.loc[buy_date], marker='^', color='green', markersize=12, label='Agent Buy', linestyle='None')
+        if exit:
+            plt.plot(price_series.loc[sell_date], marker='v', color='red', markersize=12, label='Agent Sell', linestyle='None')
+        
+        
+        # Prepare buy/sell states dfs (i.e., with feature names)
+        buy_state_df = pd.DataFrame(buy_state, columns=FeatureBuilder.STATE_FEATURES)
+        if exit:
+            sell_state_df = pd.DataFrame(sell_state, columns=FeatureBuilder.STATE_FEATURES)
+        
+        
+        return buy_state_df, buy_reward_computes, sell_state_df, sell_reward_computes
+        
+        
+        
+    
     def plot_curves(self):
         if not hasattr(self, 'curves'):
             self.compute_performance_stats()
@@ -317,8 +397,8 @@ class EDBacktester:
         ax2.set_title('Drawdowns')
         ax2.set_ylabel('Drawdown (%)')
         ax2.fill_between(self.curves.index, 0, strategy_dd, color='red', alpha=0.05)
-        ax2.set_ylim(0, global_max_dd * 1.05)
-        ax2.legend(loc='lower right')
+        ax2.set_ylim(global_max_dd * 1.05, 0)
+        ax2.legend(loc='best')
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
