@@ -506,7 +506,7 @@ class DRLAgent:
         # Get all tickers symbols
         all_tickers = state_loader.get_all_tickers()
 
-        for e in episode_ids:
+        for ei, e in enumerate(episode_ids):
 
             # Compute the total loss across the whole episode
             train_loss = 0.0
@@ -527,7 +527,7 @@ class DRLAgent:
             episode_rewards = np.zeros((len(all_tickers), L - t0 - 1))
             
             # Iterate tickers, training sequentially
-            for ti, ticker in enumerate(tqdm(all_tickers, desc=f'Training episode {e}', ncols=100)):
+            for ti, ticker in enumerate(tqdm(all_tickers, desc=f'Training episode {ei}', ncols=100)):
 
                 curr_state = state_loader.get_state_matrix('train', e, ticker, t0, self._window_size)
                 prev_pos = DRLAgent.OUT_TRADE
@@ -596,13 +596,13 @@ class DRLAgent:
                     prev_pos = curr_pos
 
             # Plot reward diagostics
-            self._plot_rewards(episode_reward_reqs, episode_rewards, f'Epsiode {e}: Reward Visualization')
+            self._plot_rewards(episode_reward_reqs, episode_rewards, f'Epsiode {ei}: Reward Visualization')
             
             # Run validation on this episode's validation set
             val_result = self._run_validation(state_loader, e, all_tickers)
             
             # Print the validation summary
-            print(f'Episode {e} validation summary:')
+            print(f'Episode {ei} validation summary:')
             print(f"Train loss: {train_loss:.4f}, Val loss: {val_result['total_loss']:.4f}, Total val trades: {val_result['total_trades']}, Hit rate: {val_result['hit_rate']:.2f}")
             print(f"Trade Duration: {val_result['trade_duration']:.2f}, Total PnL: {val_result['total_pnl']:.2f}, Profit Factor: {val_result['profit_factor']:.3f}")
             print(f"Force End Trade Count: {val_result['force_end_trades']}, Force End PnL: {val_result['force_end_pnl']:.2f}")
@@ -621,7 +621,8 @@ class DRLAgent:
             eps_end.append(epsilon_end)
             
             # Store logs for this episode
-            logs_by_episode[e] = {
+            logs_by_episode[ei] = {
+                'episode_id': e,
                 'train_loss': train_loss,
                 'val_results': val_result,
                 'epsilon_start': epsilon_start,

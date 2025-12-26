@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
 from pandas.tseries.offsets import DateOffset
 
 # Local imports for class dependencies
@@ -340,9 +339,6 @@ class EDBacktester:
             sell_t = sell_t.start if isinstance(sell_t, slice) else int(sell_t)     
             sell_state = self._state_loader.get_state_matrix('test', 0, ticker, sell_t, self._agent._window_size)   
             sell_reward_computes = self._agent_reward_states[sell_t][ticker]
-        else:
-            sell_state = pd.DataFrame()
-            sell_reward_computes = dict()
 
         # Plot the price action with buy/sell markers
         fig, ax = plt.subplots(figsize=(8, 4))
@@ -384,12 +380,12 @@ class EDBacktester:
         buy_state_df = pd.DataFrame(buy_state, columns=FeatureBuilder.STATE_FEATURES)
         if exit:
             sell_state_df = pd.DataFrame(sell_state, columns=FeatureBuilder.STATE_FEATURES)
+        else:
+            sell_state_df = pd.DataFrame()
+            sell_reward_computes = {}
         
         
         return buy_state_df, buy_reward_computes, sell_state_df, sell_reward_computes
-        
-        
-        
     
     def plot_curves(self):
         if not hasattr(self, 'curves'):
