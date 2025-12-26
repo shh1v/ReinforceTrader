@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 import tensorflow as tf
 from tensorflow import keras
-from dqn_agent import DualBranchDQN, DRLAgent
+from .dqn_agent import DRLAgent
 
 class ModelExplainer:
     def __init__(self, model_path: str) -> None:
@@ -29,19 +29,23 @@ class ModelExplainer:
         # Return the inputs as dict
         return {'state_input': state_input, 'reward_input': reward_input}
     
-    def get_1d_grad_cam(self, state: pd.DataFrame, rew_pars: dict[str, float], trade_pos, action: int, layer_name: str):
+    def _1d_grad_cam_heatmap(self, state: pd.DataFrame, rew_pars: dict[str, float], trade_pos, action: int, layer_name: str):
         # Check if trade position and action are valid
         if trade_pos not in {DRLAgent.IN_TRADE, DRLAgent.OUT_TRADE}:
             raise ValueError(f"Trade position must be either {DRLAgent.IN_TRADE} or {DRLAgent.OUT_TRADE}.")
         if action not in {DRLAgent.A_BUY, DRLAgent.A_SELL, DRLAgent.A_HOLD}:
             raise ValueError(f"Action must be supported by the DRL Agent.")
         
-        # Validate layer name and input shapes
+        # Check whether layer name exists
         if layer_name not in [layer.name for layer in self._model.layers]:
             raise ValueError(f"Layer name {layer_name} not found in the model.")
-        if state.shape != (self._model.input_shape[0][1], self._model.input_shape[0][2]):
+        
+        # Validate input shapes
+        state_input_shape = self._model.get_layer('state_input').output.shape
+        rew_pars_len = self._model.get_layer('reward_input').output.shape[1]
+        if state.shape != state_input_shape[1:]:
             raise ValueError(f"{state.shape} does not match state input shape {self._model.input_shape[0][1:]}.")
-        if len(rew_pars) + 1 != self._model.input_shape[1][1]:
+        if len(rew_pars) + 1 != rew_pars_len:
             raise ValueError(f"Reward parameters length must be {len(rew_pars) + 1}")
 
         # Get the model inputs for feed-forward
@@ -75,5 +79,12 @@ class ModelExplainer:
         
         # Apply ReLU to the heatmap
         heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-        return heatmap.numpy()
         
+        return heatmap.numpy()
+
+    def run_grad_cam(self, state: pd.DataFrame, rew_pars: dict[str, float], trade_pos, action: int, layer_name: str) -> None:
+        # Generate the Grad-CAM heatmap
+        heatmap = self._1d_grad_cam_heatmap(state, rew_pars, trade_pos, action, layer_name)
+        
+        # Plot the heatmap overlayed on the input features
+        pass
