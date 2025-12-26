@@ -108,9 +108,40 @@ class ModelExplainer:
             # Transpose and reverse. So, y axis is features, x has time steps in chronological order
             vis_state = state.T.iloc[:, ::-1]
             
-            # Setup the subplots, with shared x-axis
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
+            # Get the state image based on feature range and values
+            state_image = self._build_state_image(vis_state)
             
+            # Setup the subplots, with shared x-axis
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
+            
+            # Plot the state image
+            ax1.imshow(state_image, aspect='auto', interpolation='nearest')
+            ax1.set_yticks(np.arange(len(vis_state.index)))
+            ax1.set_yticklabels(vis_state.index, fontsize=8, fontweight='bold')
+            ax1.set_title('State Features Over Time', fontsize=12, fontweight='bold')
+            ax1.set_yticks(np.arange(len(vis_state.index)) - 0.5, minor=True)
+            ax1.grid(which="minor", color="grey", linestyle='-', linewidth=0.5, alpha=0.3)
+            ax1.tick_params(which="minor", bottom=False, left=False)
+            
+            # Plot the Grad-CAM importance scores (heatmap)
+            time_indices = np.arange(len(rev_M))
+            ax2.bar(time_indices, rev_M, color='orange', width=1.0, alpha=0.8)
+            
+            ax2.set_title('Grad-CAM Importance Scores', fontsize=12, fontweight='bold')
+            ax2.set_ylabel("Scores [0, 1]")
+            ax2.set_ylim(0, 1.1)
+            ax2.grid(True, axis='y', alpha=0.3)
+
+            ticks = np.arange(0, len(rev_M), 5)
+            max_lag = len(rev_M) - 1
+            labels = [f"t={max_lag - t}" for t in ticks]
+            
+            ax2.set_xticks(ticks)
+            ax2.set_xticklabels(labels)
+            ax2.set_xlabel("Time Lag (Right = Latest)")
+
+            plt.subplots_adjust(right=0.85)
+            plt.show()
             
     def _build_state_image(self, vis_state: pd.DataFrame) -> np.ndarray:
         # Prepare the matrix to store the color values
