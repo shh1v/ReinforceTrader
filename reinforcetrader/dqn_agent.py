@@ -631,7 +631,7 @@ class DRLAgent:
             }
             
         # Plot all the training and validation losses
-        self._plot_losses(train_losses, val_losses, state_loader, fname=os.path.join(train_config['plots_dir'], 'episode_losses.png'))
+        self._plot_losses(train_losses, val_losses, episode_ids, state_loader, fname=os.path.join(train_config['plots_dir'], 'episode_losses.png'))
         
         # Plot the epsilon decay
         eps_fname = os.path.join(train_config['plots_dir'], 'epsilon_decay.png')
@@ -873,7 +873,7 @@ class DRLAgent:
         else:
             plt.close()
     
-    def _plot_losses(self, train_losses, val_losses: list[float], state_loader: EpisodeStateLoader, fname: str | None = None, show: bool = True):
+    def _plot_losses(self, train_losses, val_losses: list[float], episode_ids: list[int], state_loader: EpisodeStateLoader, fname: str | None = None, show: bool = True):
         if len(train_losses) != len(val_losses):
             raise ValueError('Train and validation losses must have the same length')
         
@@ -883,9 +883,9 @@ class DRLAgent:
         # However, this is a naive approach and may not be perfect.
         train_losses_scaled = []
         val_losses_scaled = []
-        for i in range(len(train_losses)):
-            train_w_length = state_loader.get_episode_len('train', i)
-            val_w_length = state_loader.get_episode_len('validate', i)
+        for i, e in enumerate(episode_ids):
+            train_w_length = state_loader.get_episode_len('train', e)
+            val_w_length = state_loader.get_episode_len('validate', e)
             
             # If first episode, reduce the replay start size from training window
             # as these timesteps are not used for training immediately
