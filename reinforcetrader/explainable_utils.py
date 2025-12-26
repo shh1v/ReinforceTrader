@@ -7,6 +7,22 @@ from tensorflow import keras
 from .dqn_agent import DRLAgent
 
 class ModelExplainer:
+    DBDQN_FEATURE_PARAMS = {
+        'Body/HL': {'vmin': -1.0, 'vmax': 1.0, 'color':'redgreen'},
+        'UWick/HL': {'vmin': 0.0, 'vmax': 1.0, 'color':'red'},
+        'LWick/HL': {'vmin': 0.0, 'vmax': 1.0, 'color':'green'},
+        'Gap': {'vmin': -3.0, 'vmax': 3.0, 'color':'redgreen'},
+        'GapFill': {'vmin': 0.0, 'vmax': 1.0, 'color':'pink'},
+        'EMA5/13': {'vmin': -3.0, 'vmax': 3.0, 'color':'redgreen'},
+        'EMA13/26': {'vmin': -3.0, 'vmax': 3.0, 'color':'redgreen'},
+        'EMA26/50': {'vmin': -3.0, 'vmax': 3.0, 'color':'redgreen'},
+        'B%B': {'vmin': 0.0, 'vmax': 1.0, 'color':'redgreen'},
+        'BBW': {'vmin': -3.0, 'vmax': 3.0, 'color':'pink'},
+        'RSI': {'vmin': -3.0, 'vmax': 3.0, 'color':'redgreen'},
+        'ADX': {'vmin': 0.0, 'vmax': 1.0, 'color':'pink'},
+        'V/Vol20': {'vmin': -3.0, 'vmax': 3.0, 'color':'redgreen'},
+    }
+    
     def __init__(self, model_path: str) -> None:
         self._model_path = model_path
         
@@ -74,17 +90,85 @@ class ModelExplainer:
         # Compute the weighted combination of activations and weights
         conv_outputs = conv_outputs[0] # Remove batch dimension
         # NOTE: conv_outputs is 60x32 and weights is 32x1. Result is 60x1
-        heatmap = conv_outputs @ weights[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap)
+        M = conv_outputs @ weights[..., tf.newaxis]
+        M = tf.squeeze(M)
         
-        # Apply ReLU to the heatmap
-        heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+        # Apply ReLU to the weighted sum
+        M = tf.maximum(M, 0) / tf.math.reduce_max(M)
         
-        return heatmap.numpy()
+        return M.numpy()
 
     def run_grad_cam(self, state: pd.DataFrame, rew_pars: dict[str, float], trade_pos, action: int, layer_name: str) -> None:
-        # Generate the Grad-CAM heatmap
-        heatmap = self._1d_grad_cam_heatmap(state, rew_pars, trade_pos, action, layer_name)
+            # Generate the heatmap (Shape: (window,))
+            M = self._1d_grad_cam_heatmap(state, rew_pars, trade_pos, action, layer_name)
+            # Reverse the M so that the largest index has the value for most recent time step
+            rev_M = M[::-1]
+            
+            # Prepare the state matrix for plotting
+            # Transpose and reverse. So, y axis is features, x has time steps in chronological order
+            vis_state = state.T.iloc[:, ::-1]
+            
+            # Setup the subplots, with shared x-axis
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
+            
+            
+    def _build_state_image(self, vis_state: pd.DataFrame) -> np.ndarray:
+        # Prepare the matrix to store the color values
+        image_matrix = np.zeros((vis_state.shape[0], vis_state.shape[1], 4), dtype=np.float32)
         
-        # Plot the heatmap overlayed on the input features
-        pass
+        # Define Base Colors to compute the color values
+        COLORS = {
+            'red':   np.array([0.8, 0.0, 0.0]), # Deep Red
+            'green': np.array([0.0, 0.5, 0.0]), # Deep Green
+            'pink':  np.array([0.6, 0.0, 0.6]), # Deep Purple/Magenta
+            'yellow': np.array([0.8, 0.8, 0.0]) # Yellow
+        }
+        
+        for i, feature_name in enumerate(vis_state.index):
+            # Get feature values and configuration
+            feat_vals = vis_state.iloc[i].to_numpy()
+            feat_config = self.DBDQN_FEATURE_PARAMS.get(feature_name, None)
+            if feat_config is None:
+                raise ValueError(f"Feature {feature_name} not found in DBDQN_FEATURE_PARAMS.")
+            vmin, vmax, color = feat_config['vmin'], feat_config['vmax'], feat_config['color']
+            
+            if vmin >= vmax:
+                raise ValueError(f"Invalid vmin and vmax for feature {feature_name}.")
+            
+            if color == 'redgreen':
+                # Use red for vals<mid, green for vals>=mid
+                mid = (vmax + vmin) / 2
+                ltm_vals = feat_vals < mid
+                gtem_vals = ~ ltm_vals
+                
+                # Apply color mapping for negative values
+                if np.any(ltm_vals):
+                    ltm_range = mid - vmin
+                    val_dist = mid - feat_vals[ltm_vals]
+                    
+                    alpha_vals = np.clip(val_dist / ltm_range, 0.0, 1.0)
+                    
+                    image_matrix[i, ltm_vals, :3] = COLORS['red']
+                    image_matrix[i, ltm_vals, 3] = alpha_vals
+                if np.any(gtem_vals):
+                    gtem_range = vmax - mid
+                    val_dist = feat_vals[gtem_vals] - mid
+                    
+                    alpha_vals = np.clip(val_dist / gtem_range, 0.0, 1.0)
+                    
+                    image_matrix[i, gtem_vals, :3] = COLORS['green']
+                    image_matrix[i, gtem_vals, 3] = alpha_vals
+            else:
+                # Apply single color mapping for all values
+                rgb = COLORS.get(color, None)
+                if rgb is None:
+                    raise ValueError(f"Color {color} not defined in COLORS.")
+                v_range = vmax - vmin
+                val_dist = feat_vals - vmin
+                
+                alpha_vals = np.clip(val_dist / v_range, 0.0, 1.0)
+                
+                image_matrix[i, :, :3] = rgb
+                image_matrix[i, :, 3] = alpha_vals
+                
+        return image_matrix
