@@ -338,8 +338,7 @@ class EDBacktester:
             # sell_reward_computes = self._agent_reward_states[sell_t][ticker]
 
         # Compute the trade duration and batch sizes
-        trade_duration = (sell_date - buy_date).days if exit else None # type: ignore
-        batch_size = trade_duration + 1 if trade_duration else 1 # include buy day
+        batch_size = sell_t - buy_t + 1 if exit else 1
         num_reward_pars = len(self._agent_reward_states[buy_t][ticker])
         
         # Prepare the ndarrays for batch states and rewards
@@ -371,6 +370,7 @@ class EDBacktester:
             
             # Also plot other trade metrics (like duration, profit, etc.)
             trade_profit = trade_exit['net_profit']
+            trade_duration = (sell_date - buy_date).days # type: ignore
             stats_text = (f'Trade Duration: {trade_duration} days\n'
                           f'Net Profit: ${trade_profit:,.2f}')
             
@@ -389,6 +389,32 @@ class EDBacktester:
         plt.grid(True, alpha=0.3)
         
         return states_batch, reward_batch
+    
+    def get_random_test_samples(self, num_states: int=100) -> tuple[np.ndarray, np.ndarray]:
+        # Get random states from the backtest period for analysis
+        if not self.ran_backtest:
+            raise RuntimeError('Backtest must be run before extracting random states.')
+        
+        # Prepare container for states
+        states_batch = np.empty((num_states, self._agent._window_size, len(FeatureBuilder.STATE_FEATURES)))
+        rewards_batch = np.empty((num_states, len(self._agent_reward_states[t0][self._tickers[0]])))
+        
+        L = self._state_loader.get_episode_len('test', 0)
+        t0 = self._agent._window_size - 1
+        
+        # Get num_states random indexes
+        rand_t_indices = np.random.randint(t0, L-1, size=num_states)
+        rand_tickers = np.random.choice(self._tickers, size=num_states)
+        
+        for i, t in enumerate(rand_t_indices):
+            # Get the state and reward computes for the random ticker and timestep
+            ticker = rand_tickers[i]
+            
+            # Store in the batch containers
+            states_batch[i] = self._state_loader.get_state_matrix('test', 0, ticker, t, self._agent._window_size)
+            rewards_batch[i] = np.array(list(self._agent_reward_states[t][ticker].values()))
+        
+        return states_batch, rewards_batch
     
     def plot_curves(self):
         if not hasattr(self, 'curves'):
