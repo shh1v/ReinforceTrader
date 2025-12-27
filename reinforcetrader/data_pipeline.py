@@ -19,7 +19,7 @@ class RawDataLoader:
 
         # Make sure there is no conflict between tickers and index
         if tickers and index:
-            raise ValueError('Tickers and index cannot be provided simultaneously.')
+            raise ValueError('Tickers and index both cannot be provided.')
         elif not tickers and not index:
             raise ValueError('Either tickers or index must be provided.')
         
@@ -28,18 +28,21 @@ class RawDataLoader:
             # Prefer loading from cache to avoid API calls
             load_from_cache = True
             tickers = self._fetch_tickers(index=self._index)
-            benchmark_ticker = '^DJI' if index == 'DJI' else '^SPX'
+            if index == 'DJI':
+                yf_bench_ticker = '^DJI'
+            elif index == 'SP500':
+                yf_bench_ticker = '^SPX'
+            else:
+                raise ValueError('Invalid index: {index}')
         else:
             # Only load from cache if tickers are fetched from index
             load_from_cache = False
-            benchmark_ticker = None
-            
-            
+            yf_bench_ticker = None
 
         # Load all the ticker price and volume data
         self._ticker_data = self._load_hist_prices(tickers, load_from_cache=load_from_cache)
-        if benchmark_ticker:
-            self._benchmark_data = self._download_hist_prices([benchmark_ticker], save=False)
+        if yf_bench_ticker:
+            self._benchmark_data = self._download_hist_prices([yf_bench_ticker], save=False)
         else:
             self._benchmark_data = None
             
@@ -105,7 +108,7 @@ class RawDataLoader:
 
         return data
 
-    def _load_hist_prices(self, tickers: list, load_from_cache, cache_path: str='data/raw') -> pd.DataFrame:
+    def _load_hist_prices(self, tickers: list, load_from_cache, cache_path: str='../data/raw') -> pd.DataFrame:
 
         # Build cache directory and file path
         cache_dir = Path(cache_path)
@@ -130,6 +133,18 @@ class RawDataLoader:
         return self._ticker_data, self._benchmark_data
 
 class FeatureBuilder:
+    
+    # Predefine feature names
+    # Include OHLCV portfolio managment and more
+    OHLCV_FEATURES = ['Open', 'High', 'Low', 'Close', 'Volume']
+    # Include the stock returns for the reward fn (e.g. DSR or DDDR)
+    RETURNS_FEATURES = [f'1DFRet']
+    # Include all the DQN features used in state representations
+    STATE_FEATURES = ['Body/HL', 'UWick/HL', 'LWick/HL', 'Gap', 'GapFill',
+                    'EMA5/13', 'EMA13/26', 'EMA26/50', 'B%B', 'BBW',
+                    'RSI', 'ADX', 'V/Vol20']
+
+    
     def __init__(self, ticker_data, benchmark_data: pd.DataFrame, f_prefix: str) -> None:
         if ticker_data.empty or benchmark_data.empty:
             raise ValueError('Ticker data and benchmark data cannot be empty.')
@@ -142,7 +157,7 @@ class FeatureBuilder:
         self._features_data = None
         self._feature_indices = None
 
-    def _save_features_data(self, save_dir='data/processed') -> bool:
+    def _save_features_data(self, save_dir='../data/processed') -> bool:
         if self._features_data is None or self._features_data.empty:
             print('Features data not built or empty')
             return False
@@ -180,19 +195,9 @@ class FeatureBuilder:
     def build_features(self, save=True):
         # Get tickers symbols
         tickers = self._ticker_data.columns.get_level_values('Ticker').unique()
-
-        # Predefine feature names
-        # Include OHLCV portfolio managment and more
-        OHLCV_f = ['Open', 'High', 'Low', 'Close', 'Volume']
-        # Include the stock returns for the reward fn (e.g. DSR or DDDR)
-        returns_f = [f'1DFRet']
-        # Include all the DQN features used in state representations
-        state_f = ['Body/HL', 'UWick/HL', 'LWick/HL', 'Gap', 'GapFill',
-                        'EMA5/13', 'EMA13/26', 'EMA26/50', 'B%B', 'BBW',
-                        'RSI', 'ADX', 'V/Vol20']
-
+        
         # Predefine the feature dataframe
-        feature_columns = pd.MultiIndex.from_product([tickers, OHLCV_f + returns_f + state_f],
+        feature_columns = pd.MultiIndex.from_product([tickers, self.OHLCV_FEATURES + self.RETURNS_FEATURES + self.STATE_FEATURES],
                                                      names=['Ticker', 'Feature'])
         self._features_data = pd.DataFrame(index=self._ticker_data.index, columns=feature_columns, dtype=float)
         
@@ -302,9 +307,9 @@ class FeatureBuilder:
         
         # Rewards are seperated from other features to avoid data leakage causing bias    
         feature_indices = {
-            'OHLCV': np.flatnonzero(feat_level.isin(OHLCV_f)),
-            'Rewards': np.flatnonzero(feat_level.isin(returns_f)),
-            'State': np.flatnonzero(feat_level.isin(state_f))
+            'OHLCV': np.flatnonzero(feat_level.isin(self.OHLCV_FEATURES)),
+            'Rewards': np.flatnonzero(feat_level.isin(self.RETURNS_FEATURES)),
+            'State': np.flatnonzero(feat_level.isin(self.STATE_FEATURES))
         }
         
         self._feature_indices = feature_indices
