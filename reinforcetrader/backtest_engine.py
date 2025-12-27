@@ -396,6 +396,7 @@ class EDBacktester:
             raise RuntimeError('Backtest must be run before extracting random states.')
         
         # Prepare container for states
+        t0 = self._agent._window_size - 1
         states_batch = np.empty((num_states, self._agent._window_size, len(FeatureBuilder.STATE_FEATURES)))
         rewards_batch = np.empty((num_states, len(self._agent_reward_states[t0][self._tickers[0]])))
         

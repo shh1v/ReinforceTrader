@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import shap
 import tensorflow as tf
 from tensorflow import keras
 from .dqn_agent import DRLAgent
@@ -36,16 +37,16 @@ class ModelExplainer:
     def get_model_summary(self) -> None:
         self._model.summary()
     
-    def get_model_input(self, state_matrix: pd.DataFrame, trade_pos, rew_pars: dict[str, float]):
+    def get_model_input(self, state_matrix: np.ndarray, trade_pos: int, rew_pars: np.ndarray) -> dict[str, np.ndarray]:
         # Convert the model inputs to their respective data types
-        state_input = np.expand_dims(state_matrix.to_numpy(), axis=0).astype(np.float32)
-        complete_reward_params = [trade_pos] + list(rew_pars.values())
+        state_input = np.expand_dims(state_matrix, axis=0).astype(np.float32)
+        complete_reward_params = np.concatenate(([trade_pos], rew_pars))
         reward_input = np.array([complete_reward_params], dtype=np.float32)
         
         # Return the inputs as dict
         return {'state_input': state_input, 'reward_input': reward_input}
     
-    def _1d_grad_cam_heatmap(self, state: pd.DataFrame, rew_pars: dict[str, float], trade_pos, action: int, layer_name: str):
+    def _1d_grad_cam_heatmap(self, state: np.ndarray, rew_pars: np.ndarray, trade_pos, action: int, layer_name: str):
         # Check if trade position and action are valid
         if trade_pos not in {DRLAgent.IN_TRADE, DRLAgent.OUT_TRADE}:
             raise ValueError(f"Trade position must be either {DRLAgent.IN_TRADE} or {DRLAgent.OUT_TRADE}.")
@@ -98,7 +99,7 @@ class ModelExplainer:
         
         return M.numpy()
 
-    def run_grad_cam(self, state: pd.DataFrame, rew_pars: dict[str, float], trade_pos, action: int, layer_name: str) -> None:
+    def run_grad_cam(self, state: np.ndarray, rew_pars: np.ndarray, trade_pos, action: int, layer_name: str) -> None:
             # Generate the heatmap (Shape: (window,))
             M = self._1d_grad_cam_heatmap(state, rew_pars, trade_pos, action, layer_name)
             # Reverse the M so that the largest index has the value for most recent time step
@@ -106,7 +107,7 @@ class ModelExplainer:
             
             # Prepare the state matrix for plotting
             # Transpose and reverse. So, y axis is features, x has time steps in chronological order
-            vis_state = state.T.iloc[:, ::-1]
+            vis_state = state.T[:, ::-1]
             
             # Get the state image based on feature range and values
             state_image = self._build_state_image(vis_state)
@@ -114,12 +115,15 @@ class ModelExplainer:
             # Setup the subplots, with shared x-axis
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
             
+            # Get the feature names for y-ticks
+            feature_names = list(self.DBDQN_FEATURE_PARAMS.keys())
+            
             # Plot the state image
             ax1.imshow(state_image, aspect='auto', interpolation='nearest')
-            ax1.set_yticks(np.arange(len(vis_state.index)))
-            ax1.set_yticklabels(vis_state.index, fontsize=8, fontweight='bold')
+            ax1.set_yticks(np.arange(len(feature_names)))
+            ax1.set_yticklabels(feature_names, fontsize=8, fontweight='bold')
             ax1.set_title('State Features Over Time', fontsize=12, fontweight='bold')
-            ax1.set_yticks(np.arange(len(vis_state.index)) - 0.5, minor=True)
+            ax1.set_yticks(np.arange(len(feature_names)) - 0.5, minor=True)
             ax1.grid(which="minor", color="grey", linestyle='-', linewidth=0.5, alpha=0.3)
             ax1.tick_params(which="minor", bottom=False, left=False)
             
@@ -143,21 +147,23 @@ class ModelExplainer:
             plt.subplots_adjust(right=0.85)
             plt.show()
             
-    def _build_state_image(self, vis_state: pd.DataFrame) -> np.ndarray:
+    def _build_state_image(self, vis_state: np.ndarray) -> np.ndarray:
         # Prepare the matrix to store the color values
         image_matrix = np.zeros((vis_state.shape[0], vis_state.shape[1], 4), dtype=np.float32)
         
         # Define Base Colors to compute the color values
         COLORS = {
-            'red':   np.array([0.8, 0.0, 0.0]), # Deep Red
-            'green': np.array([0.0, 0.5, 0.0]), # Deep Green
-            'pink':  np.array([0.6, 0.0, 0.6]), # Deep Purple/Magenta
+            'red':   np.array([0.8, 0.0, 0.0]), # Red
+            'green': np.array([0.0, 0.5, 0.0]), # Green
+            'pink':  np.array([0.6, 0.0, 0.6]), # Purple/Magenta
             'yellow': np.array([0.8, 0.8, 0.0]) # Yellow
         }
         
-        for i, feature_name in enumerate(vis_state.index):
+        feature_names = list(self.DBDQN_FEATURE_PARAMS.keys())
+        
+        for i, feature_name in enumerate(feature_names):
             # Get feature values and configuration
-            feat_vals = vis_state.iloc[i].to_numpy()
+            feat_vals = vis_state[i]
             feat_config = self.DBDQN_FEATURE_PARAMS.get(feature_name, None)
             if feat_config is None:
                 raise ValueError(f"Feature {feature_name} not found in DBDQN_FEATURE_PARAMS.")
