@@ -33,23 +33,25 @@ class ModelExplainer:
             print(f"Model successfully loaded from {model_path}")
         except FileNotFoundError:
             raise ValueError(f"Error: The model file was not found at {model_path}")
+        
+        # Store the state feature names
+        self._state_feat_names = list(self.DBDQN_FEATURE_PARAMS.keys())
+        
+        # Set flags for SHAP explainer
+        self._shap_baseline_set = False
 
     def get_model_summary(self) -> None:
         self._model.summary()
     
-    def get_model_input(self, state_matrix: np.ndarray, trade_pos: int, rew_pars: np.ndarray) -> dict[str, np.ndarray]:
+    def get_model_input(self, state_matrix: np.ndarray, reward_params: np.ndarray) -> dict[str, np.ndarray]:
         # Convert the model inputs to their respective data types
         state_input = np.expand_dims(state_matrix, axis=0).astype(np.float32)
-        complete_reward_params = np.concatenate(([trade_pos], rew_pars))
-        reward_input = np.array([complete_reward_params], dtype=np.float32)
+        reward_input = np.array([reward_params], dtype=np.float32)
         
         # Return the inputs as dict
         return {'state_input': state_input, 'reward_input': reward_input}
     
-    def _1d_grad_cam_heatmap(self, state: np.ndarray, rew_pars: np.ndarray, trade_pos, action: int, layer_name: str):
-        # Check if trade position and action are valid
-        if trade_pos not in {DRLAgent.IN_TRADE, DRLAgent.OUT_TRADE}:
-            raise ValueError(f"Trade position must be either {DRLAgent.IN_TRADE} or {DRLAgent.OUT_TRADE}.")
+    def _1d_grad_cam_heatmap(self, state: np.ndarray, rew_pars: np.ndarray, action: int, layer_name: str):
         if action not in {DRLAgent.A_BUY, DRLAgent.A_SELL, DRLAgent.A_HOLD}:
             raise ValueError(f"Action must be supported by the DRL Agent.")
         
@@ -62,11 +64,11 @@ class ModelExplainer:
         rew_pars_len = self._model.get_layer('reward_input').output.shape[1]
         if state.shape != state_input_shape[1:]:
             raise ValueError(f"{state.shape} does not match state input shape {self._model.input_shape[0][1:]}.")
-        if len(rew_pars) + 1 != rew_pars_len:
-            raise ValueError(f"Reward parameters length must be {len(rew_pars) + 1}")
+        if len(rew_pars) != rew_pars_len:
+            raise ValueError(f"Reward parameters length must be {len(rew_pars)}")
 
         # Get the model inputs for feed-forward
-        model_inputs = self.get_model_input(state, trade_pos, rew_pars)
+        model_inputs = self.get_model_input(state, rew_pars)
         
         # Create a model that outputs the layer output and the final prediction
         grad_model = keras.Model(
@@ -99,9 +101,9 @@ class ModelExplainer:
         
         return M.numpy()
 
-    def run_grad_cam(self, state: np.ndarray, rew_pars: np.ndarray, trade_pos, action: int, layer_name: str) -> None:
+    def run_grad_cam(self, state: np.ndarray, rew_pars: np.ndarray, action: int, layer_name: str) -> None:
             # Generate the heatmap (Shape: (window,))
-            M = self._1d_grad_cam_heatmap(state, rew_pars, trade_pos, action, layer_name)
+            M = self._1d_grad_cam_heatmap(state, rew_pars, action, layer_name)
             # Reverse the M so that the largest index has the value for most recent time step
             rev_M = M[::-1]
             
@@ -115,15 +117,12 @@ class ModelExplainer:
             # Setup the subplots, with shared x-axis
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
             
-            # Get the feature names for y-ticks
-            feature_names = list(self.DBDQN_FEATURE_PARAMS.keys())
-            
             # Plot the state image
             ax1.imshow(state_image, aspect='auto', interpolation='nearest')
-            ax1.set_yticks(np.arange(len(feature_names)))
-            ax1.set_yticklabels(feature_names, fontsize=8, fontweight='bold')
+            ax1.set_yticks(np.arange(len(self._state_feat_names)))
+            ax1.set_yticklabels(self._state_feat_names, fontsize=8, fontweight='bold')
             ax1.set_title('State Features Over Time', fontsize=12, fontweight='bold')
-            ax1.set_yticks(np.arange(len(feature_names)) - 0.5, minor=True)
+            ax1.set_yticks(np.arange(len(self._state_feat_names)) - 0.5, minor=True)
             ax1.grid(which="minor", color="grey", linestyle='-', linewidth=0.5, alpha=0.3)
             ax1.tick_params(which="minor", bottom=False, left=False)
             
@@ -159,9 +158,7 @@ class ModelExplainer:
             'yellow': np.array([0.8, 0.8, 0.0]) # Yellow
         }
         
-        feature_names = list(self.DBDQN_FEATURE_PARAMS.keys())
-        
-        for i, feature_name in enumerate(feature_names):
+        for i, feature_name in enumerate(self._state_feat_names):
             # Get feature values and configuration
             feat_vals = vis_state[i]
             feat_config = self.DBDQN_FEATURE_PARAMS.get(feature_name, None)
@@ -209,3 +206,63 @@ class ModelExplainer:
                 image_matrix[i, :, 3] = alpha_vals
                 
         return image_matrix
+    
+    def setup_shap_explainer(self, bg_states: np.ndarray, bg_rewards: np.ndarray) -> None:
+        if self._shap_baseline_set:
+            print("SHAP explainer already setup. Skipping..")
+            return
+        
+        # Create a model rapper to transform input for keras model
+        def model_w_list_input(model_inputs):
+            input_dict = {
+                'state_input': model_inputs[0],
+                'reward_input': model_inputs[1]
+            }
+            return self._model(input_dict)
+        
+        # Create a SHAP explainer using DeepExplainer (requires model input as list)
+        self._shap_explainer = shap.DeepExplainer(model_w_list_input, [bg_states, bg_rewards])
+        
+        # SHAP baseline is now set
+        self._shap_baseline_set = True
+    
+    def run_shap(self, state: np.ndarray, rew_pars: np.ndarray, action: int) -> None:
+        # Check if action is valid for the trade_pos
+        if rew_pars[0] == DRLAgent.OUT_TRADE and action == DRLAgent.A_SELL:
+            raise ValueError("Cannot explain SELL action when not in trade.")
+        if rew_pars[0] == DRLAgent.IN_TRADE and action == DRLAgent.A_BUY:
+            raise ValueError("Cannot explain BUY action when already in trade.")
+        
+        # Check if SHAP explainer is setup
+        if not self._shap_baseline_set:
+            raise ValueError("SHAP explainer not setup. Call setup_shap_explainer() first.")
+        
+        # State and reward inputs don't have batch dimension
+        # So expand dims, and create model input as list
+        model_input = [
+            np.expand_dims(state, axis=0).astype(np.float32),
+            np.array([rew_pars], dtype=np.float32)
+        ]
+        
+        # Compute the SHAP values for the target input
+        shap_values = self._shap_explainer.shap_values(model_input)
+        # Extract SHAP values for the selected action
+        shap_a_values = shap_values[action]
+        
+        # Separate SHAP values for state and reward parameters
+        state_shap_vals = shap_a_values[0][0]  # Shape: (window, state features)
+        rew_pars_shap_vals = shap_a_values[1][0]  # Shape: ([trade_pos] + reward params)
+        
+    def plot_state_shap(self) -> None:
+        pass
+    
+    def plot_reward_shap(self) -> None:
+        pass
+        
+        
+        
+        
+        
+        
+        
+        
