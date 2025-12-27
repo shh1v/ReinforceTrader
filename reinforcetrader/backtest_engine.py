@@ -55,7 +55,7 @@ class EDBacktester:
         self._benchmark_prices = None
         
         # Track weather backtest has been run
-        self._backtest_ran = False
+        self.ran_backtest = False
 
     def _init_agent_memory(self, t0) -> None:
         # NOTE: t=t0 is exclusive of the data used to init reward params
@@ -175,7 +175,7 @@ class EDBacktester:
         self.universe_prices = pd.DataFrame(price_data, index=self.portfolio_history_df.index)
         
         # Set backtest ran flag
-        self._backtest_ran = True
+        self.ran_backtest = True
         
         return self.portfolio_history_df, self.trade_logs_df
                     
@@ -234,7 +234,7 @@ class EDBacktester:
     def compute_performance_stats(self) -> pd.DataFrame:
         # Computes strategy perfomance and other benchmark (index, EWP)
         
-        if not self._backtest_ran:
+        if not self.ran_backtest:
             raise RuntimeError('Backtest must be run before computing performance statistics.')
         
         # Compute the strategy returns
@@ -299,13 +299,10 @@ class EDBacktester:
         
         return self.perf_stats_df
     
-    def get_trade_scenario(self, buy_date: pd.Timestamp, ticker: str,) -> tuple[pd.DataFrame,
-                                                                                dict[str, float],
-                                                                                pd.DataFrame,
-                                                                                dict[str, float]]:
+    def get_trade_scenario(self, buy_date: pd.Timestamp, ticker: str) -> tuple[np.ndarray, np.ndarray]:
         # method to extract trade scenario for given trade
         # Returns the state matrix, reward computes, and plots buy sell action
-        if not self._backtest_ran:
+        if not self.ran_backtest:
             raise RuntimeError('Backtest must be run before running trade scenrios.')
         
         trade_entry = self.trade_logs_df.loc[(self.trade_logs_df['date'] == buy_date) &
@@ -325,25 +322,40 @@ class EDBacktester:
         else:
             trade_exit = trade_exits.iloc[0]
             exit = True
-            
-        # Get the states and reward computes at trade times
-        # Get the buy/sell dates
+        
+        # Calculate the timestep indices for buy date
         buy_t = self._test_dates.get_loc(buy_date)
         buy_t = buy_t.start if isinstance(buy_t, slice) else int(buy_t)
-        buy_state = self._state_loader.get_state_matrix('test', 0, ticker, buy_t, self._agent._window_size)
-        buy_reward_computes = self._agent_reward_states[buy_t][ticker]
+        # buy_state = self._state_loader.get_state_matrix('test', 0, ticker, buy_t, self._agent._window_size)
+        # buy_reward_computes = self._agent_reward_states[buy_t][ticker]
         
+        # If the agent closes the position, get sell state as well
         if exit:
             sell_date = pd.Timestamp(trade_exit['date'])
             sell_t = self._test_dates.get_loc(sell_date)
             sell_t = sell_t.start if isinstance(sell_t, slice) else int(sell_t)     
-            sell_state = self._state_loader.get_state_matrix('test', 0, ticker, sell_t, self._agent._window_size)   
-            sell_reward_computes = self._agent_reward_states[sell_t][ticker]
+            # sell_state = self._state_loader.get_state_matrix('test', 0, ticker, sell_t, self._agent._window_size)   
+            # sell_reward_computes = self._agent_reward_states[sell_t][ticker]
 
+        # Compute the trade duration and batch sizes
+        trade_duration = (sell_date - buy_date).days if exit else None # type: ignore
+        batch_size = trade_duration + 1 if trade_duration else 1 # include buy day
+        num_reward_pars = len(self._agent_reward_states[buy_t][ticker])
+        
+        # Prepare the ndarrays for batch states and rewards
+        # states will be (days, window, features), rewards will be (days, reward values)
+        states_batch = np.empty((batch_size, self._agent._window_size, len(FeatureBuilder.STATE_FEATURES)))
+        reward_batch = np.empty((batch_size, num_reward_pars))
+        
+        for i in range(batch_size):
+            curr_t = buy_t + i
+            states_batch[i] = self._state_loader.get_state_matrix('test', 0, ticker, curr_t, self._agent._window_size)
+            reward_batch[i] = np.array(list(self._agent_reward_states[curr_t][ticker].values()))
+        
         # Plot the price action with buy/sell markers
         fig, ax = plt.subplots(figsize=(8, 4))
         
-        # Get price series for the ticker
+        # Get price series for the ticker (add buffer days for context)
         plot_start_date = buy_date - pd.Timedelta(days=self._agent._window_size - 1)
         plot_end_date = sell_date + pd.Timedelta(days=10) if exit else buy_date + pd.Timedelta(days=30)
         price_series = self.universe_prices[ticker].loc[plot_start_date : plot_end_date]
@@ -358,7 +370,6 @@ class EDBacktester:
             plt.plot(sell_point, marker='v', color='red', markersize=12, label='Agent Sell', linestyle='None')
             
             # Also plot other trade metrics (like duration, profit, etc.)
-            trade_duration = (sell_date - buy_date).days # type: ignore
             trade_profit = trade_exit['net_profit']
             stats_text = (f'Trade Duration: {trade_duration} days\n'
                           f'Net Profit: ${trade_profit:,.2f}')
@@ -372,20 +383,12 @@ class EDBacktester:
             
         plt.title(f'Trade Scenario for {ticker}: Buy on {buy_date.date()}' + (f', Sell on {sell_date.date()}' if exit else ''))
         plt.xlabel('Date')
+        ax.tick_params(axis='x', labelrotation=45)
         plt.ylabel('Price ($)')
         plt.legend(loc='best')
         plt.grid(True, alpha=0.3)
         
-        # Prepare buy/sell states dfs (i.e., with feature names)
-        buy_state_df = pd.DataFrame(buy_state, columns=FeatureBuilder.STATE_FEATURES)
-        if exit:
-            sell_state_df = pd.DataFrame(sell_state, columns=FeatureBuilder.STATE_FEATURES)
-        else:
-            sell_state_df = pd.DataFrame()
-            sell_reward_computes = {}
-        
-        
-        return buy_state_df, buy_reward_computes, sell_state_df, sell_reward_computes
+        return states_batch, reward_batch
     
     def plot_curves(self):
         if not hasattr(self, 'curves'):
