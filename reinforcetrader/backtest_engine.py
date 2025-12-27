@@ -37,13 +37,11 @@ class EDBacktester:
         self._max_pos = max_pos
         self._pos_size_limit = self._cash_balance / self._max_pos
         
-        # Per ticker state tracking
+        # Per ticker state/reward tracking
         self._tickers = self._state_loader.get_all_tickers()
-        self._current_positions = {ticker: self._agent.OUT_TRADE for ticker in self._tickers}
         self._entry_prices = {ticker: 0.0 for ticker in self._tickers}
         self._shares_held = {ticker: 0 for ticker in self._tickers}
-        
-        # Container for reward params used in state represention
+        self._current_positions: dict[int, dict[str, int]] = {}
         self._agent_reward_states: dict[int, dict[str, dict[str, float]]] = {}
         
         # Strategy portfolio logging
@@ -58,6 +56,9 @@ class EDBacktester:
         self.ran_backtest = False
 
     def _init_agent_memory(self, t0) -> None:
+        # Initialize agent trade position
+        self._current_positions[t0] = {ticker: self._agent.OUT_TRADE for ticker in self._tickers}
+        
         # NOTE: t=t0 is exclusive of the data used to init reward params
         self._agent_reward_states[t0] = {}
         for ticker in self._tickers:
@@ -90,7 +91,8 @@ class EDBacktester:
             buy_requests = []
             ticker_action = {}
             
-            # Create reward state container for next timestep
+            # Create trade pos and reward state container for next timestep
+            self._current_positions[t+1] = {}
             self._agent_reward_states[t+1] = {}
             
             for ticker in self._tickers:
@@ -102,7 +104,7 @@ class EDBacktester:
                 
                 # Get current state and position
                 curr_state = self._state_loader.get_state_matrix('test', 0, ticker, t, self._agent._window_size)
-                prev_pos = self._current_positions[ticker]
+                prev_pos = self._current_positions[t][ticker]
                 curr_ef = list(self._agent_reward_states[t][ticker].values())
                 
                 action, q_value = self._agent._act(curr_state, prev_pos, curr_ef, training=False)
@@ -122,7 +124,7 @@ class EDBacktester:
             buy_requests.sort(key=lambda x: x['q_value'], reverse=True)
             for req in buy_requests:
                 # NOTE: Relies on assumption that IN_TRADE/OUT_TRADE being 1/0
-                active_pos_count = sum(self._current_positions.values())
+                active_pos_count = sum(self._current_positions[t].values())
                 
                 success = False
                 if active_pos_count < self._max_pos:
@@ -147,6 +149,9 @@ class EDBacktester:
                 # but, betting on the fact that they are negligible for practical purposes
                 self._agent._set_reward_computes(self._agent_reward_states[t][ticker])
                 self._agent_reward_states[t+1][ticker] = self._agent._update_reward_computes(fRt)
+                
+                # Update current position for next timestep
+                self._current_positions[t+1][ticker] = curr_pos
             
             # Compute portfolio value at end of day
             portfolio_value = self._cash_balance
@@ -163,7 +168,7 @@ class EDBacktester:
                 'date': curr_date,
                 'portfolio_value': portfolio_value,
                 'cash_balance': self._cash_balance,
-                'num_positions': sum(self._current_positions.values())
+                'num_positions': sum(self._current_positions[t].values())
             })
         
         # Prepare dataframes for portfolio history and trade logs
@@ -191,7 +196,6 @@ class EDBacktester:
         self._cash_balance -= trade_cost
         self._shares_held[ticker] = shares
         self._entry_prices[ticker] = price
-        self._current_positions[ticker] = self._agent.IN_TRADE
         
         # Append the transaction to trade logs
         self._trade_logs.append({
@@ -217,7 +221,6 @@ class EDBacktester:
         profit = trade_gross_val - trans_cost_dollars - buy_cost
         self._cash_balance += trade_gross_val - trans_cost_dollars
         self._shares_held[ticker] = 0
-        self._current_positions[ticker] = self._agent.OUT_TRADE
 
         self._trade_logs.append({
             'date': self._test_dates[t],
@@ -344,12 +347,14 @@ class EDBacktester:
         # Prepare the ndarrays for batch states and rewards
         # states will be (days, window, features), rewards will be (days, reward values)
         states_batch = np.empty((batch_size, self._agent._window_size, len(FeatureBuilder.STATE_FEATURES)))
-        reward_batch = np.empty((batch_size, num_reward_pars))
+        reward_batch = np.empty((batch_size, num_reward_pars + 1)) # +1 for trade position
         
         for i in range(batch_size):
             curr_t = buy_t + i
+            trade_post = self._current_positions[curr_t][ticker]
+            rewards_params = list(self._agent_reward_states[curr_t][ticker].values())
             states_batch[i] = self._state_loader.get_state_matrix('test', 0, ticker, curr_t, self._agent._window_size)
-            reward_batch[i] = np.array(list(self._agent_reward_states[curr_t][ticker].values()))
+            reward_batch[i] = np.concatenate(([trade_post], rewards_params))
         
         # Plot the price action with buy/sell markers
         fig, ax = plt.subplots(figsize=(8, 4))
@@ -398,7 +403,7 @@ class EDBacktester:
         # Prepare container for states
         t0 = self._agent._window_size - 1
         states_batch = np.empty((num_states, self._agent._window_size, len(FeatureBuilder.STATE_FEATURES)))
-        rewards_batch = np.empty((num_states, len(self._agent_reward_states[t0][self._tickers[0]])))
+        rewards_batch = np.empty((num_states, 1 + len(self._agent_reward_states[t0][self._tickers[0]])))
         
         L = self._state_loader.get_episode_len('test', 0)
         t0 = self._agent._window_size - 1
@@ -411,9 +416,12 @@ class EDBacktester:
             # Get the state and reward computes for the random ticker and timestep
             ticker = rand_tickers[i]
             
+            # Get trade position
+            trade_post = self._current_positions[t][ticker]
+            reward_params = list(self._agent_reward_states[t][ticker].values())
             # Store in the batch containers
             states_batch[i] = self._state_loader.get_state_matrix('test', 0, ticker, t, self._agent._window_size)
-            rewards_batch[i] = np.array(list(self._agent_reward_states[t][ticker].values()))
+            rewards_batch[i] = np.concatenate(([trade_post], reward_params))
         
         return states_batch, rewards_batch
     
