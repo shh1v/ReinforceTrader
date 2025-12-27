@@ -95,7 +95,7 @@ class DRLAgent:
         # Compute the number of reward params to make its a valid MDP
         # Note: num_reward_params should have -1 (Rt is not included)
         # and +1 (trade pos is included). Thus net 0
-        self.num_reward_params = len(self._reward_param_keys(self.reward_type))
+        self.num_reward_params = len(self.reward_param_keys(self.reward_type))
         
         # A = {0: buy, 1: hold, 2: sell}
         self._action_size = 3
@@ -337,21 +337,22 @@ class DRLAgent:
         
         return float(loss_val)
     
-    def _reward_param_keys(self, reward_type: str) -> set[str]:
+    @staticmethod
+    def reward_param_keys(reward_type: str) -> list[str]:
         # Small Helper method. Uff..
         match reward_type:
             case 'DSR':
-                return {'Rt', 'A_tm1', 'B_tm1'}
+                return ['Rt', 'A_tm1', 'B_tm1']
             case 'DDDR':
-                return {'Rt', 'A_tm1', 'DD_tm1'}
+                return ['Rt', 'A_tm1', 'DD_tm1']
             case 'PNL':
-                return {'Rt'}
+                return ['Rt']
             case _:
                 raise ValueError(f'Invalid reward type: {reward_type}')
     
     def _compute_reward(self, params: dict[str, float], action: float) -> float:
         # Check if all the required keys are present        
-        missing_params = [k for k in self._reward_param_keys(self.reward_type) if k not in params]
+        missing_params = [k for k in self.reward_param_keys(self.reward_type) if k not in params]
         if missing_params:
             raise ValueError(f"Missing required reward parameters for {self.reward_type}: {missing_params}")
         

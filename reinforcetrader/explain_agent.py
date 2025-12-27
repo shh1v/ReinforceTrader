@@ -24,7 +24,7 @@ class ModelExplainer:
         'V/Vol20': {'vmin': -3.0, 'vmax': 3.0, 'color':'redgreen'},
     }
     
-    def __init__(self, model_path: str) -> None:
+    def __init__(self, model_path: str, reward_function: str) -> None:
         self._model_path = model_path
         
         try:
@@ -34,8 +34,10 @@ class ModelExplainer:
         except FileNotFoundError:
             raise ValueError(f"Error: The model file was not found at {model_path}")
         
-        # Store the state feature names
+        # Store the state and rewardfeature names
         self._state_feat_names = list(self.DBDQN_FEATURE_PARAMS.keys())
+        reward_function_params = DRLAgent.reward_param_keys(reward_function)
+        self._rew_feat_names = ['trade_pos'] + reward_function_params[1:] # Exclude Rt
         
         # Set flags for SHAP explainer
         self._shap_baseline_set = False
@@ -212,16 +214,20 @@ class ModelExplainer:
             print("SHAP explainer already setup. Skipping..")
             return
         
-        # Create a model rapper to transform input for keras model
-        def model_w_list_input(model_inputs):
-            input_dict = {
-                'state_input': model_inputs[0],
-                'reward_input': model_inputs[1]
-            }
-            return self._model(input_dict)
+        # Get the input shapes for keras model
+        state_input_shape = self._model.get_layer('state_input').output.shape
+        reward_input_shape = self._model.get_layer('reward_input').output.shape
+        
+        # Create wrapper model input
+        w_state_input = keras.Input(shape=state_input_shape[1:], name='w_state_input')
+        w_reward_input = keras.Input(shape=reward_input_shape[1:], name='w_reward_input')
+        w_output = self._model({'state_input': w_state_input, 'reward_input': w_reward_input}, training=False)
+        
+        # Create the wrapper model
+        w_model = keras.Model(inputs=[w_state_input, w_reward_input], outputs=w_output)
         
         # Create a SHAP explainer using DeepExplainer (requires model input as list)
-        self._shap_explainer = shap.DeepExplainer(model_w_list_input, [bg_states, bg_rewards])
+        self._shap_explainer = shap.GradientExplainer(w_model, [bg_states, bg_rewards])
         
         # SHAP baseline is now set
         self._shap_baseline_set = True
@@ -239,30 +245,71 @@ class ModelExplainer:
         
         # State and reward inputs don't have batch dimension
         # So expand dims, and create model input as list
-        model_input = [
-            np.expand_dims(state, axis=0).astype(np.float32),
-            np.array([rew_pars], dtype=np.float32)
-        ]
+        state_input = np.expand_dims(state, axis=0).astype(np.float32)
+        reward_input = np.array([rew_pars], dtype=np.float32)
+        model_input = [state_input, reward_input]
         
         # Compute the SHAP values for the target input
-        shap_values = self._shap_explainer.shap_values(model_input)
-        # Extract SHAP values for the selected action
-        shap_a_values = shap_values[action]
+        # Rseed set for reproducibility (see https://github.com/shap/shap/issues/1010)
+        shap_values = self._shap_explainer.shap_values(model_input, rseed=56)
         
         # Separate SHAP values for state and reward parameters
-        state_shap_vals = shap_a_values[0][0]  # Shape: (window, state features)
-        rew_pars_shap_vals = shap_a_values[1][0]  # Shape: ([trade_pos] + reward params)
+        state_shap_vals = shap_values[0][0, :, :, action] # type: ignore
+        reward_shap_vals = shap_values[1][0, :, action] # type: ignore
         
-    def plot_state_shap(self) -> None:
-        pass
-    
-    def plot_reward_shap(self) -> None:
-        pass
+        # Plot the SHAP state and reward values as heatmap
+        self._plot_shap_values(state_shap_vals, reward_shap_vals, reward_input, action)
         
+    def _plot_shap_values(self, state_shap, reward_shap, reward_raw, action):
+        # Transpose and reverse the state SHAP for visualization
+        vis_shap = state_shap.T[:, ::-1]
         
+        # Setup Figure: Top = Heatmap, Bottom = Bar Chart
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8),
+                                       gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.3})
         
+        # First, plot the SHAP heatmap for state features
+        heat_val_lim = np.max(np.abs(vis_shap))
+        im = ax1.imshow(vis_shap, aspect='auto', cmap='seismic', vmin=-heat_val_lim, vmax=heat_val_lim)
         
+        # Formatting Y-Axis
+        ax1.set_yticks(np.arange(len(self._state_feat_names)))
+        ax1.set_yticklabels(self._state_feat_names, fontsize=9, fontweight='bold')
+        act_str = {DRLAgent.A_BUY: "Buy", DRLAgent.A_SELL: "Sell", DRLAgent.A_HOLD: "Hold"}.get(action, "N/A")
+        ax1.set_title(f"State SHAP Values (Red = Pushes for {act_str} action, Blue = Against)", fontweight='bold', fontsize=12)
         
+        # Formatting X-Axis (Time)
+        n_timesteps = vis_shap.shape[1]
+        ticks = np.arange(0, n_timesteps, 5)
+        labels = [f"t={n_timesteps - 1 - t}" for t in ticks]
+        ax1.set_xticks(ticks)
+        ax1.set_xticklabels(labels)
+        ax1.set_xlabel("Time Lag (Right = Latest)")
         
+        # Colorbar and grid lines
+        cbar = plt.colorbar(im, ax=ax1, fraction=0.046, pad=0.04)
+        cbar.set_label('SHAP Impact', rotation=270, labelpad=15)
         
+        ax1.set_yticks(np.arange(len(self._state_feat_names)) - 0.5, minor=True)
+        ax1.grid(which="minor", color="black", linestyle='-', linewidth=0.5, alpha=0.1)
+        ax1.tick_params(which="minor", bottom=False, left=False)
+
+        # Second, plot the SHAP bar chart for reward parameters
+        colors = ['#d62728' if x > 0 else '#1f77b4' for x in reward_shap] # Red/Blue
+        y_pos = np.arange(len(self._rew_feat_names))
         
+        ax2.barh(y_pos, reward_shap, color=colors)
+        ax2.set_yticks(y_pos)
+        ax2.set_yticklabels(self._rew_feat_names, fontweight='bold', fontsize=10)
+        
+        ax2.axvline(0, color='black', linewidth=0.8)
+        ax2.set_xlabel(f"SHAP Value (Impact on Q-Value)")
+        ax2.set_title(f"Impact of Reward Parameters & Position", fontweight='bold', fontsize=12)
+        ax2.grid(axis='x', alpha=0.3)
+
+        # Annotate bars with values
+        for i, v in enumerate(reward_shap):
+            feat_val = reward_raw[0][i]
+            ax2.text(v, i, f" Val: {feat_val:.2e}", va='center', fontsize=9)
+
+        plt.show()
