@@ -1,0 +1,74 @@
+{
+  "0": {
+    "episode_id": 5,
+    "train_loss": 2448.93191623874,
+    "val_results": {
+      "total_loss": 539.0368154558913,
+      "cum_reward": 29.271073010870232,
+      "total_trades": 130,
+      "trade_duration": 54.738461538461536,
+      "hit_rate": 0.6538461538461539,
+      "total_pnl": 328.459537267685,
+      "profit_factor": 2.219906251856656,
+      "force_end_trades": 19,
+      "force_end_pnl": 31.291659593582143
+    },
+    "epsilon_start": 0.1,
+    "epsilon_current": 0.06224096857888896,
+    "epsilon_end": 0.04965462477185194
+  },
+  "1": {
+    "episode_id": 5,
+    "train_loss": 2930.0243588387966,
+    "val_results": {
+      "total_loss": 426.19082740043484,
+      "cum_reward": 42.75691949634118,
+      "total_trades": 84,
+      "trade_duration": 67.54761904761905,
+      "hit_rate": 0.7142857142857143,
+      "total_pnl": 425.2495586872102,
+      "profit_factor": 4.643666324621338,
+      "force_end_trades": 12,
+      "force_end_pnl": 97.91542434692386
+    },
+    "epsilon_start": 0.06224096857888896,
+    "epsilon_current": 0.05295476595513486,
+    "epsilon_end": 0.04985936508055016
+  },
+  "2": {
+    "episode_id": 5,
+    "train_loss": 2778.911882733926,
+    "val_results": {
+      "total_loss": 281.0413944256591,
+      "cum_reward": 89.31078960044904,
+      "total_trades": 115,
+      "trade_duration": 35.38260869565217,
+      "hit_rate": 0.7130434782608696,
+      "total_pnl": 276.1810460090637,
+      "profit_factor": 2.6818175245210205,
+      "force_end_trades": 8,
+      "force_end_pnl": -8.106758117675838
+    },
+    "epsilon_start": 0.05295476595513486,
+    "epsilon_current": 0.050552846959398365,
+    "epsilon_end": 0.04975220729415286
+  },
+  "3": {
+    "episode_id": 5,
+    "train_loss": 2615.0386341717094,
+    "val_results": {
+      "total_loss": 216.77753461207783,
+      "cum_reward": 63.04871939205135,
+      "total_trades": 108,
+      "trade_duration": 25.22222222222222,
+      "hit_rate": 0.6574074074074074,
+      "total_pnl": 245.8428375720978,
+      "profit_factor": 2.5570556323492464,
+      "force_end_trades": 9,
+      "force_end_pnl": -6.023292541503949
+    },
+    "epsilon_start": 0.050552846959398365,
+    "epsilon_current": 0.05003086497230435,
+    "epsilon_end": 0.04985687097660634
+  }
+}
