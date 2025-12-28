@@ -251,7 +251,7 @@ class ModelExplainer:
         
         # Compute the SHAP values for the target input
         # Rseed set for reproducibility (see https://github.com/shap/shap/issues/1010)
-        shap_values = self._shap_explainer.shap_values(model_input, rseed=56)
+        shap_values = self._shap_explainer.shap_values(model_input, rseed=42)
         
         # Separate SHAP values for state and reward parameters
         state_shap_vals = shap_values[0][0, :, :, action] # type: ignore
