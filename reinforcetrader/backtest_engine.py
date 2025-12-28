@@ -435,6 +435,7 @@ class EDBacktester:
         self.curves.plot(ax=ax1, linewidth=2)
         ax1.set_title(f'Equity Curve Comparison (Init. Capital: ${self._initial_cash:,.0f})')
         ax1.set_ylabel('Portfolio Value ($)')
+        ax1.set_xlabel('Date')
         ax1.grid(True, alpha=0.3)
         
         # Second plot: Drawdowns
