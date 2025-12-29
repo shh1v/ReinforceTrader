@@ -1,0 +1,15 @@
+name: RTenv
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pandas
+  - lxml
+  - scikit-learn
+  - ipywidgets
+  - plotly
+  - nbformat
+  - seaborn
+  - pydot
+  - graphviz
+  - shap
