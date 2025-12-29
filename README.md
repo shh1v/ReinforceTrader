@@ -48,6 +48,7 @@
         <li><a href="#installation">Installation</a></li>
       </ul>
     </li>
+    <li><a href="#limitations">Limitations</a></li>
     <li><a href="#upcoming-features">Upcoming Features</a></li>
     <li><a href="#contributing">Contributing</a></li>
     <li><a href="#acknowledgments">Acknowledgments</a></li>
@@ -210,36 +211,37 @@ This section outlines how to install dependencies and run the Jupyter notebooks 
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
+<!-- Limitations -->
+## Limitations
+
+The following limitations should be considered when evaluating the current performance and generalization capabilities of the model:
+
+1. The current state space relies exclusively on price-derived technical features. A more robust agent would likely require a multi-modal approach, incorporating fundamental data, macroeconomic indicators, or sentiment analysis to capture a holistic view of the market environment.
+2. The model was trained on the `Dow Jones 30` index constituents from 2000–2020. While sufficient for a proof-of-concept, modern RL applications in finance typically benefit from significantly larger and more diverse datasets (e.g., Russell 3000, global indices) to improve generalization. Scaling the data was constrained by available computational resources.
+3. The current reward functions and backtester assume execution at the closing price without slippage. In a live trading environment, market impact and slippage—particularly for larger position sizes—would materially affect net returns. Future iterations should incorporate a slippage model to better reflect market microstructure realities.
+4. The implemented XAI tools (Grad-CAM and SHAP) provide valuable initial insights but exhibit sensitivity to initialization parameters. For instance, the `GradientExplainer` shows high variance in SHAP values depending on the `rseed`, a known challenge when applying perturbation-based explainability methods to finanacial time-series data.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- ROADMAP -->
 ## Upcoming Features
 
-- [x] Add Changelog
-- [x] Add back to top links
-- [ ] Add Additional Templates w/ Examples
-- [ ] Add "components" document to easily copy & paste sections of the readme
-- [ ] Multi-language Support
-    - [ ] Chinese
-    - [ ] Spanish
-
-See the [open issues](https://github.com/othneildrew/Best-README-Template/issues) for a full list of proposed features (and known issues).
+- [ ] Implement multi-step learning for DQN to improve convergence speed and better handle the noisy reward signals inherent in financial time series.
+- [ ] Expand the state space to include alternative data sources, such as market sentiment analysis and geopolitical news indicators, to capture broader market dynamics.
+- [ ] Develop and test composite reward functions that simultaneously optimize for multiple objectives, such as minimizing drawdowns while maximizing excess returns.
+- [ ] Implement a live paper-trading environment using the Interactive Brokers (IBKR) API to validate strategy performance in real-time market conditions.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
 
 <!-- ACKNOWLEDGMENTS -->
 ## Acknowledgments
 
-Use this space to list resources you find helpful and would like to give credit to. I've included a few of my favorites to kick things off!
+Here is a list of resources I found helpful:
 
-* [Choose an Open Source License](https://choosealicense.com)
-* [GitHub Emoji Cheat Sheet](https://www.webpagefx.com/tools/emoji-cheat-sheet)
-* [Malven's Flexbox Cheatsheet](https://flexbox.malven.co/)
-* [Malven's Grid Cheatsheet](https://grid.malven.co/)
-* [Img Shields](https://shields.io)
-* [GitHub Pages](https://pages.github.com)
-* [Font Awesome](https://fontawesome.com)
-* [React Icons](https://react-icons.github.io/react-icons/search)
+* [Learning to Trade with Reinforcement Learning](https://dennybritz.com/posts/wildml/learning-to-trade-with-reinforcement-learning/)
+* [Explainable AI for Computer Vision](https://adataodyssey.com/course/)
+* [Rainbow DQN](https://doi.org/10.48550/arXiv.1710.02298)
+* [Udacity AI Trading Strategies (Paid)](https://www.udacity.com/course/ai-trading-strategies--nd881)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
