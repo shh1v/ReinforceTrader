@@ -69,7 +69,7 @@ We applied the Deep Q-Networks algorithm (DQN; [Mnih et al., 2013](https://doi.o
 
 The target value function is formulated using the Bellman equation. To address the substantial overestimation bias found in vanilla DQN, I implemented Double DQN (DDQN; [Hasselt et al., 2015](https://doi.org/10.48550/arXiv.1509.06461)). This splits action selection from evaluation by maintaining an `online` network for selecting actions and a `target` network for evaluating the Q-value:
 
-$$Q(s, a)_{online} = R_{t+1} +Q_{target}(s', \argmax_{a'} Q_{online}(s', a'))$$
+$$Q(s, a)_{online} = R_{t+1} +Q_{target}(s\prime, \mathop{\mathrm{argmax}}_{a\prime} Q_{online}(s\prime, a\prime))$$
 
 The target network weights are updated via Polyak soft updates. I also implemented the Dueling architecture ([Wang et al., 2016](https://doi.org/10.48550/arXiv.1511.06581)), which decouples the Q-value into two estimators: one for the state value function $V(s)$ and another for the state-dependent action advantage function $A(s, a)$. This enables faster and more reliable learning.
 
@@ -80,14 +80,14 @@ The equations for DSR and DDDR are derived by considering exponential moving ave
 
 $$S_t = \frac{A_t}{\sqrt{B_t-A^{2}_t}}$$
 
-Where $ A_t = A_{t-1} + \eta(R_t-A_{t-1})$ and $B_t = B_{t-1} + \eta(R^{2}_t-B_{t-1})$.
+Where $A_t = A_{t-1} + \eta(R_t-A_{t-1})$ and $B_t = B_{t-1} + \eta(R^2_t - B_{t-1})$
+
+
 
 The first-order expansion gives:
 
-$$S_t \big|_{\eta > 0} \approx
-S_{t-1}
-+ \eta \frac{d S_t}{d \eta} \bigg|_{\eta = 0}
-+ \mathcal{O}(\eta^2)
+$$
+S_t \big|_{\eta > 0} \approx S_{t-1} + \eta \frac{d S_t}{d \eta} \bigg|_{\eta = 0} + \mathcal{O}(\eta^2)
 $$
 
 Using the chain rule, we find that:
@@ -98,25 +98,20 @@ D_t = \frac{d S_t}{d \eta}
 {\left(B_{t-1} - A_{t-1}^2\right)^{3/2}}
 $$
 
-Where $ \Delta A_t = R_t-A_{t-1}$ and $ \Delta B_t = R^{2}_t-B_{t-1}$. $D_t$, representing the DSR, essentially measures the *sensitivity* of the Sharpe ratio to the return.
+Where $\Delta A_t = R_t - A_{t-1}$ and $\Delta B_t = R^2_t-B_{t-1}$. $D_t$, representing the DSR, essentially measures the *sensitivity* of the Sharpe ratio to the return.
 
 Similarly, the DDDR is computed as follows:
 
 $$
-D_t \equiv \frac{d\,\mathrm{DDR}_t}{d\eta}
-=
+D_t \equiv \frac{d\,\mathrm{DDR}_t}{d\eta} =
 \begin{cases}
-\dfrac{R_t - \tfrac{1}{2} A_{t-1}}{\mathrm{DD}_{t-1}},
-& R_t > 0, \\[8pt]
-\dfrac{\mathrm{DD}_{t-1}^2 \left(R_t - \tfrac{1}{2} A_{t-1}\right)
-- \tfrac{1}{2} A_{t-1} R_t^2}
-{\mathrm{DD}_{t-1}^3},
-& R_t \le 0.
+\frac{R_t - \frac{1}{2} A_{t-1}}{\mathrm{DD}_{t-1}}, & R_t > 0, \\
+\frac{\mathrm{DD}_{t-1}^2 \left(R_t - \frac{1}{2} A_{t-1}\right) - \frac{1}{2} A_{t-1} R_t^2}{\mathrm{DD}_{t-1}^3}, & R_t \le 0.
 \end{cases}
 $$
 
 Where $A_t = A_{t-1} + \eta \left(R_t - A_{t-1}\right)$ and
-$\mathrm{DD}_t^2 = \mathrm{DD}_{t-1}^2 + \eta \left(\min\{R_t, 0\}^2 - \mathrm{DD}_{t-1}^2\right)$.
+$\mathrm{DD}\_t^2 = \mathrm{DD}\_{t-1}^2 + \eta (\min\{R\_t, 0\}^2 - \mathrm{DD}\_{t-1}^2)$.
 
 In practice, recursive functions like DSR and DDDR require initial parameter estimates for $A_t$ or $DD_t$. These are initialized (hot-started) using a subset of data kept out of the training set (as outlined on [QFSE](https://quant.stackexchange.com/questions/42665/how-to-calculate-differential-sharpe-ratio)). See `DRLAgent` for implementation details.
 
