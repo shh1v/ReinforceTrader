@@ -120,28 +120,28 @@ The `EpisodeStateLoader` class prepares the state representation for every episo
 
 Training is managed by the `DRLAgent` class, which maintains an experience replay memory buffer. Training steps are performed by randomly sampling batches from this buffer. Hyperparameters are set via a config at the `train()` call, supporting features such as epsilon boosting and experience replay start lags. I also perform post-episode validation steps to generate visualizations (e.g., cumulative reward trajectories) and compute performance metrics for the validation window, such as hit rate and profit factor.
 
-<figure>
-    <center>
-    <img src="./figures/post_ep_metrics.png" alt="Post-Episode Metrics" width='100%'>
-    <figcaption>Fig 1. Training and validation measures after each episode.</figcaption></center>
-</figure>
+<div align="center">
+  <img src="./figures/post_ep_metrics.png" alt="Post-Episode Metrics" width="100%">
+  <br>
+  <b>Fig 1. Training and validation measures after each episode.</b>
+</div>
 
 I trained the DDDQN model with the DSR reward function for multiple rounds, iterating through WFV windows, and observed the following loss progression.
 
-<figure>
-    <center>
-    <img src="./plots/overall_loss_plot.png" alt="Overall training and validation losses" width='100%'>
-    <figcaption>Fig 2. Overall training and validation losses with epsilon values.</figcaption></center>
-</figure>
+<div align="center">
+  <img src="./plots/overall_loss_plot.png" alt="Overall training and validation losses" width="100%">
+  <br>
+  <b>Fig 2. Overall training and validation losses with epsilon values.</b>
+</div>
 
 ### Backtesting
 I implemented a custom event-driven backtester using the `EDBacktester` class. While many Python libraries exist for backtesting, I developed a custom engine specifically catered to RL agents. This allowed me to account for real-time position sizing, cash management, and portfolio constraints while enabling direct comparison against benchmarks like Equal-Weighted Portfolios (EWP) and Buy-and-Hold strategies. The engine also generates trade scenario visualizations to investigate specific agent behaviors during entry and exit points. This data is subsequently used by the explainability modules.
 
-<figure>
-    <center>
-    <img src="./figures/equity_curve.png" alt="Portfolio Curve" width='100%'>
-    <figcaption>Fig 4. Portfolio value versus benchmarks and corresponding drawdowns.</figcaption></center>
-</figure>
+<div align="center">
+  <img src="./figures/equity_curve.png" alt="Portfolio Curve" width="100%">
+  <br>
+  <b>Fig 3. Portfolio value versus benchmarks and corresponding drawdowns.</b>
+</div>
 
 
 ### Explainability
@@ -151,20 +151,19 @@ $$L^c_{\mathrm{Grad-CAM}} = \mathrm{ReLU}(\sum_k{a^c_kA^k})$$
 
 Where $a^c_k$ is the weight of the $k^{\mathrm{th}}$ feature map for prediction class $c$, and $A^k$ is the $k^{\mathrm{th}}$ feature map.
 
-<figure>
-    <center>
-    <img src="./figures/grad_cam.png" alt="Grad-CAM method visualiztion" width='100%'>
-    <figcaption>Fig 5. Grad-CAM visualization of state features and their importance scores over time for an MCD trade.</figcaption></center>
-</figure>
+<div align="center">
+  <img src="./figures/grad_cam.png" alt="Grad-CAM method visualiztion" width="100%">
+  <br>
+  <b>Fig 4. Grad-CAM visualization of state features and their importance scores over time for an MCD trade.</b>
+</div>
 
 Grad-CAM has limitations, particularly with noisy financial data where visual explanations can be ambiguous and misleading. It primarily identifies *where* the model is looking but not necessarily *how* specific features contribute to the decision. To address this, I also implemented the SHAP method using the `GradientExplainer` from the `shap` library. This method quantifies the marginal contribution of each feature to the individual prediction.
 
-<figure>
-    <center>
-    <img src="./figures/shap_method.png" alt="SHAP method visualiztion" width='100%'>
-    <figcaption>Fig 6. SHAP values visualization of state and reward features over time for an MCD trade.</figcaption></center>
-</figure>
-
+<div align="center">
+  <img src="./figures/shap_method.png" alt="SHAP method visualiztion" width="100%">
+  <br>
+  <b>Fig 5. SHAP values visualization of state and reward features over time for an MCD trade.</b>
+</div>
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
