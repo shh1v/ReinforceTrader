@@ -59,13 +59,19 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-Give a general information about the model.
+This research project implements a complete Machine Learning workflow for an automated trading model. It features end-to-end data processing pipelines, efficient state representation for Walk-Forward Validation (WFV), and a custom Dual-Branch Dueling Double DQN architecture. Furthermore, the project includes an event-driven backtesting engine that accounts for realistic portfolio constraints such as transaction costs and dynamic position sizing. Finally, I implemented Explainable AI (XAI) tools, including Grad-CAM and SHAP, to interpret the feature contributions driving the agent's trading decisions.
 
 ### Data Preprocessing
-Talk about data fetching, feature building, etc.
+The pipeline begins with fetching, cleaning, and validating market data, followed by feature engineering. The `RawDataLoader` class retrieves ticker data via the Yahoo Finance API. It supports fetching OHLCV data for composite indices (e.g., S&P 500, Dow Jones) by scraping constituent lists from sources like Wikipedia. To minimize API calls, the loader caches raw data locally and validates existing files before downloading. The `FeatureBuilder` class constructs the technical indicators used for RL state representation and reward computation, preparing the dataset for training through techniques such as rolling window standardization and rescaling.
 
 ### Dueling Double DQN (DDDQN)
-Talk about the model architecture and rational behind it.
+We applied the Deep Q-Networks algorithm (DQN; [Mnih et al., 2013](https://doi.org/10.48550/arXiv.1312.5602)), a value-based RL algorithm designed for sequential decision-making problems like stock trading. The architecture, defined in the DualBranchDQN class, utilizes a dual-branch structure: a 1-D Convolutional Neural Network (CNN) branch processes the window of price state features, while a separate Multilayer Perceptron (MLP) branch processes reward-specific features (e.g., trade position, historical return moments).
+
+The target value function is formulated using the Bellman equation. To address the substantial overestimation bias found in vanilla DQN, I implemented Double DQN (DDQN; [Hasselt et al., 2015](https://doi.org/10.48550/arXiv.1509.06461)). This splits action selection from evaluation by maintaining an `online` network for selecting actions and a `target` network for evaluating the Q-value:
+
+$$Q(s, a)_{online} = R_{t+1} +Q_{target}(s', \argmax_{a'} Q_{online}(s', a'))$$
+
+The target network weights are updated via Polyak soft updates. I also implemented the Dueling architecture ([Wang et al., 2016](https://doi.org/10.48550/arXiv.1511.06581)), which decouples the Q-value into two estimators: one for the state value function $V(s)$ and another for the state-dependent action advantage function $A(s, a)$. This enables faster and more reliable learning.
 
 ### State and Reward Functions
 Talk about what the state representation has and the different reward functions implemented.
