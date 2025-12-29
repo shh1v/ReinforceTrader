@@ -121,7 +121,23 @@ $\mathrm{DD}_t^2 = \mathrm{DD}_{t-1}^2 + \eta \left(\min\{R_t, 0\}^2 - \mathrm{D
 In practice, recursive functions like DSR and DDDR require initial parameter estimates for $A_t$ or $DD_t$. These are initialized (hot-started) using a subset of data kept out of the training set (as outlined on [QFSE](https://quant.stackexchange.com/questions/42665/how-to-calculate-differential-sharpe-ratio)). See `DRLAgent` for implementation details.
 
 ### Model Training
-Talk about WFV, the memoery buffer dynamics, and the validation window and cum. reward analysis
+The `EpisodeStateLoader` class prepares the state representation for every episode. Episodes are constructed based on Walk-Forward Validation (WFV), supporting both `moving` and `expanding` window modes.
+
+Training is managed by the `DRLAgent` class, which maintains an experience replay memory buffer. Training steps are performed by randomly sampling batches from this buffer. Hyperparameters are set via a config at the `train()` call, supporting features such as epsilon boosting and experience replay start lags. I also perform post-episode validation steps to generate visualizations (e.g., cumulative reward trajectories) and compute performance metrics for the validation window, such as hit rate and profit factor.
+
+<figure>
+    <center>
+    <img src="./figures/post_ep_metrics.png" alt="Post-Episode Metrics" width='100%'>
+    <figcaption>Fig 1. Training and validation measures after each episode.</figcaption></center>
+</figure>
+
+I trained the DDDQN model with the DSR reward function for multiple rounds, iterating through WFV windows, and observed the following loss progression.
+
+<figure>
+    <center>
+    <img src="./plots/overall_loss_plot.png" alt="Post-Episode Metrics" width='100%'>
+    <figcaption>Fig 2. Training and validation measures after each episode.</figcaption></center>
+</figure>
 
 ### Backtesting
 Talk about the event driven backtester built, and how it consists of features to make it realistic.
