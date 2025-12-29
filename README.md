@@ -74,7 +74,51 @@ $$Q(s, a)_{online} = R_{t+1} +Q_{target}(s', \argmax_{a'} Q_{online}(s', a'))$$
 The target network weights are updated via Polyak soft updates. I also implemented the Dueling architecture ([Wang et al., 2016](https://doi.org/10.48550/arXiv.1511.06581)), which decouples the Q-value into two estimators: one for the state value function $V(s)$ and another for the state-dependent action advantage function $A(s, a)$. This enables faster and more reliable learning.
 
 ### State and Reward Functions
-Talk about what the state representation has and the different reward functions implemented.
+I implemented three distinct reward functions: the Differential Sharpe Ratio (DSR), the Differential Downside Deviation Ratio (DDDR), also known as the Differential Sortino Ratio ([Moody and Saffel, 2001](https://doi.org/10.1109/72.935097)), and simple Log Returns (PnL).
+
+The equations for DSR and DDDR are derived by considering exponential moving averages of returns and standard deviation, expanded via a first-order Taylor series on the adaptation rate $\eta$. Let $A_t$ and $B_t$ be the first and second moments of returns, respectively. Let $S_t$ denote the Sharpe ratio. Then:
+
+$$S_t = \frac{A_t}{\sqrt{B_t-A^{2}_t}}$$
+
+Where $ A_t = A_{t-1} + \eta(R_t-A_{t-1})$ and $B_t = B_{t-1} + \eta(R^{2}_t-B_{t-1})$.
+
+The first-order expansion gives:
+
+$$S_t \big|_{\eta > 0} \approx
+S_{t-1}
++ \eta \frac{d S_t}{d \eta} \bigg|_{\eta = 0}
++ \mathcal{O}(\eta^2)
+$$
+
+Using the chain rule, we find that:
+
+$$
+D_t = \frac{d S_t}{d \eta}
+= \frac{B_{t-1}\,\Delta A_t - \tfrac{1}{2} A_{t-1}\,\Delta B_t}
+{\left(B_{t-1} - A_{t-1}^2\right)^{3/2}}
+$$
+
+Where $ \Delta A_t = R_t-A_{t-1}$ and $ \Delta B_t = R^{2}_t-B_{t-1}$. $D_t$, representing the DSR, essentially measures the *sensitivity* of the Sharpe ratio to the return.
+
+Similarly, the DDDR is computed as follows:
+
+$$
+D_t \equiv \frac{d\,\mathrm{DDR}_t}{d\eta}
+=
+\begin{cases}
+\dfrac{R_t - \tfrac{1}{2} A_{t-1}}{\mathrm{DD}_{t-1}},
+& R_t > 0, \\[8pt]
+\dfrac{\mathrm{DD}_{t-1}^2 \left(R_t - \tfrac{1}{2} A_{t-1}\right)
+- \tfrac{1}{2} A_{t-1} R_t^2}
+{\mathrm{DD}_{t-1}^3},
+& R_t \le 0.
+\end{cases}
+$$
+
+Where $A_t = A_{t-1} + \eta \left(R_t - A_{t-1}\right)$ and
+$\mathrm{DD}_t^2 = \mathrm{DD}_{t-1}^2 + \eta \left(\min\{R_t, 0\}^2 - \mathrm{DD}_{t-1}^2\right)$.
+
+In practice, recursive functions like DSR and DDDR require initial parameter estimates for $A_t$ or $DD_t$. These are initialized (hot-started) using a subset of data kept out of the training set (as outlined on [QFSE](https://quant.stackexchange.com/questions/42665/how-to-calculate-differential-sharpe-ratio)). See `DRLAgent` for implementation details.
 
 ### Model Training
 Talk about WFV, the memoery buffer dynamics, and the validation window and cum. reward analysis
