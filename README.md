@@ -12,7 +12,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/shh1v/ReinforceTrader">
-    <img src="./figures/logo.png" alt="Logo" width="300">
+    <img src="./figures/logo.png" alt="Logo" width="400">
   </a>
 
   <p align="center">
@@ -66,7 +66,7 @@ This research project implements a complete Machine Learning workflow for an aut
 The pipeline begins with fetching, cleaning, and validating market data, followed by feature engineering. The `RawDataLoader` class retrieves ticker data via the Yahoo Finance API. It supports fetching OHLCV data for composite indices (e.g., S&P 500, Dow Jones) by scraping constituent lists from sources like Wikipedia. To minimize API calls, the loader caches raw data locally and validates existing files before downloading. The `FeatureBuilder` class constructs the technical indicators used for RL state representation and reward computation, preparing the dataset for training through techniques such as rolling window standardization and rescaling.
 
 ### Dueling Double DQN (DDDQN)
-We applied the Deep Q-Networks algorithm (DQN; [Mnih et al., 2013](https://doi.org/10.48550/arXiv.1312.5602)), a value-based RL algorithm designed for sequential decision-making problems like stock trading. The architecture, defined in the DualBranchDQN class, utilizes a dual-branch structure: a 1-D Convolutional Neural Network (CNN) branch processes the window of price state features, while a separate Multilayer Perceptron (MLP) branch processes reward-specific features (e.g., trade position, historical return moments).
+We applied the Deep Q-Networks algorithm (DQN; [Mnih et al., 2013](https://doi.org/10.48550/arXiv.1312.5602)), a value-based RL algorithm designed for sequential decision-making problems like stock trading. The architecture, defined in the `DualBranchDQN` class, utilizes a dual-branch structure: a 1-D Convolutional Neural Network (CNN) branch processes the window of price state features, while a separate Multilayer Perceptron (MLP) branch processes reward-specific features (e.g., trade position, historical return moments).
 
 The target value function is formulated using the Bellman equation. To address the substantial overestimation bias found in vanilla DQN, I implemented Double DQN (DDQN; [Hasselt et al., 2015](https://doi.org/10.48550/arXiv.1509.06461)). This splits action selection from evaluation by maintaining an `online` network for selecting actions and a `target` network for evaluating the Q-value:
 
@@ -184,6 +184,7 @@ This section outlines how to install dependencies and run the Jupyter notebooks 
 
 ### Installation
 
+Note: For read-only access, you can directly view the [Training](https://nbviewer.org/github/shh1v/ReinforceTrader/blob/main/notebooks/Training.ipynb), [Backtesting](https://nbviewer.org/github/shh1v/ReinforceTrader/blob/main/notebooks/Backtesting.ipynb), and [Explainability](https://nbviewer.org/github/shh1v/ReinforceTrader/blob/main/notebooks/Explainability.ipynb) notebooks using `nbviewer`.
 
 1. Clone the repo
    ```sh
@@ -239,8 +240,9 @@ The following limitations should be considered when evaluating the current perfo
 Here is a list of resources I found helpful:
 
 * [Learning to Trade with Reinforcement Learning](https://dennybritz.com/posts/wildml/learning-to-trade-with-reinforcement-learning/)
-* [Explainable AI for Computer Vision](https://adataodyssey.com/course/)
-* [Rainbow DQN](https://doi.org/10.48550/arXiv.1710.02298)
+* [Rainbow DQN Paper](https://doi.org/10.48550/arXiv.1710.02298)
+* [Convolutional Neural Network Models for Time Series Forecasting](https://machinelearningmastery.com/how-to-develop-convolutional-neural-network-models-for-time-series-forecasting/?utm_source=chatgpt.com)
+* [Explainable AI for Computer Vision](https://adataodyssey.com/xai-for-cv/)
 * [Udacity AI Trading Strategies (Paid)](https://www.udacity.com/course/ai-trading-strategies--nd881)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
