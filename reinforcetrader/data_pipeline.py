@@ -10,39 +10,45 @@ from ta.momentum import RSIIndicator
 
 
 class RawDataLoader:
+    TICKER_SOURCES = {
+        'spx': ('^SPX', 'sp500'),
+        'mag7': ('MAGS', 'magnificent7'),
+        'ark': ('ARKK', 'etf/ark-invest/ARKK'),
+        'dji': ('^DJI', 'dowjones'),
+        'ndx': ('^NDX', 'nasdaq100')}
+        
     def __init__(self, start_date: str, end_date: str, tickers=[], index: str='', verbose=True):
-        # Store the start and end dates of data to be downloaded/load from cache
+        # Store the start and end dates of data to be downloaded/load from cache\
+        # Note: Index is also known as the universe (of tradable assets)
         self._start_date = start_date
         self._end_date = end_date
-        self._index = index
+        self._index = index.lower()
         self._verbose = verbose
 
         # Make sure there is no conflict between tickers and index
-        if tickers and index:
+        if self._index and tickers:
             raise ValueError('Tickers and index both cannot be provided.')
-        elif not tickers and not index:
+        elif not tickers and not self._index:
             raise ValueError('Either tickers or index must be provided.')
         
+        # Make sure the index is valid if provided
+        if self._index and self._index not in self.TICKER_SOURCES:
+            raise ValueError(f'Invalid index/universe: {self._index}')
+
         # Fetch all the tickers in index if specific tickers are not provided
         if not tickers:
             # Prefer loading from cache to avoid API calls
             load_from_cache = True
             tickers = self._fetch_tickers(index=self._index)
-            if index == 'DJI':
-                yf_bench_ticker = '^DJI'
-            elif index == 'SP500':
-                yf_bench_ticker = '^SPX'
-            else:
-                raise ValueError('Invalid index: {index}')
         else:
             # Only load from cache if tickers are fetched from index
             load_from_cache = False
-            yf_bench_ticker = None
 
         # Load all the ticker price and volume data
         self._ticker_data = self._load_hist_prices(tickers, load_from_cache=load_from_cache)
-        if yf_bench_ticker:
-            self._benchmark_data = self._download_hist_prices([yf_bench_ticker], save=False)
+        if self._index:
+            index_ticker = self.TICKER_SOURCES[self._index][0]
+            self._benchmark_data = self._download_hist_prices([index_ticker], save=False)
         else:
             self._benchmark_data = None
             
