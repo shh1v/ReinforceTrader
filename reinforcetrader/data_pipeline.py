@@ -10,49 +10,55 @@ from ta.momentum import RSIIndicator
 
 
 class RawDataLoader:
+    TICKER_SOURCES = {
+        'spx': ('^SPX', 'sp500'),
+        'mag7': ('MAGS', 'magnificent7'),
+        'ark': ('ARKK', 'etf/ark-invest/ARKK'),
+        'dji': ('^DJI', 'dowjones'),
+        'ndx': ('^NDX', 'nasdaq100')}
+        
     def __init__(self, start_date: str, end_date: str, tickers=[], index: str='', verbose=True):
-        # Store the start and end dates of data to be downloaded/load from cache
+        # Store the start and end dates of data to be downloaded/load from cache\
+        # Note: Index is also known as the universe (of tradable assets)
         self._start_date = start_date
         self._end_date = end_date
-        self._index = index
+        self._index = index.lower()
         self._verbose = verbose
 
         # Make sure there is no conflict between tickers and index
-        if tickers and index:
+        if self._index and tickers:
             raise ValueError('Tickers and index both cannot be provided.')
-        elif not tickers and not index:
+        elif not tickers and not self._index:
             raise ValueError('Either tickers or index must be provided.')
         
+        # Make sure the index is valid if provided
+        if self._index and self._index not in self.TICKER_SOURCES:
+            raise ValueError(f'Invalid index/universe: {self._index}')
+
         # Fetch all the tickers in index if specific tickers are not provided
-        if not tickers:
+        if self._index:
             # Prefer loading from cache to avoid API calls
             load_from_cache = True
             tickers = self._fetch_tickers(index=self._index)
-            if index == 'DJI':
-                yf_bench_ticker = '^DJI'
-            elif index == 'SP500':
-                yf_bench_ticker = '^SPX'
-            else:
-                raise ValueError('Invalid index: {index}')
+            print(f'Fetched {len(tickers)} tickers for index {self._index.upper()}.')
         else:
             # Only load from cache if tickers are fetched from index
             load_from_cache = False
-            yf_bench_ticker = None
 
         # Load all the ticker price and volume data
         self._ticker_data = self._load_hist_prices(tickers, load_from_cache=load_from_cache)
-        if yf_bench_ticker:
-            self._benchmark_data = self._download_hist_prices([yf_bench_ticker], save=False)
+        if self._index:
+            index_ticker = self.TICKER_SOURCES[self._index][0]
+            self._benchmark_data = self._download_hist_prices([index_ticker], save=False)
         else:
             self._benchmark_data = None
             
     def _fetch_tickers(self, index: str='DJI') -> list:
-        if index == 'DJI':
-            url = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
-        elif index == 'SP500':
-            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        else:
-            raise ValueError('Invalid index: {index}')
+        if self._index not in self.TICKER_SOURCES:
+            raise ValueError(f'Invalid index/universe: {self._index}')
+        
+        url_index_ext = self.TICKER_SOURCES[self._index][1]
+        url = f'https://www.slickcharts.com/{url_index_ext}'
         
         # Fetch the Index tables from wikipedia (one of them should be list of tickers)
         headers = {"User-Agent": "Mozilla/5.0 (compatible; ReinforceTrader/1.0)"}
@@ -63,8 +69,11 @@ class RawDataLoader:
         if ticker_table is None:
             raise ValueError('Couldn\'t find a table with a \'Symbol\' column on the page.')
         
-        # Get ticker names and exclude class B shares
-        tickers = [ticker for ticker in ticker_table['Symbol'] if '.B' not in ticker]
+        # Some ticker table may not have symbol for assets, so drop those rows with NaN symbols
+        valid_tickers = ticker_table['Symbol'].dropna(inplace=False)
+        
+        # Exclude class B shares, if any
+        tickers = [ticker for ticker in valid_tickers if '.B' not in ticker]
     
         return tickers
 
@@ -92,7 +101,7 @@ class RawDataLoader:
 
     def _download_hist_prices(self, tickers: list, save: bool, save_path=None) -> pd.DataFrame:
         # Download data from yfinance
-        data = yf.download(tickers=tickers, start=self._start_date, end=self._end_date, auto_adjust=True, progress=self._verbose, threads=True)
+        data = yf.download(tickers=tickers, start=self._start_date, end=self._end_date, auto_adjust=True, progress=False, threads=True)
 
         # Reorder multi-column index to ['Ticker', 'Price']
         data = data.reorder_levels(['Ticker', 'Price'], axis=1)
@@ -113,7 +122,7 @@ class RawDataLoader:
         # Build cache directory and file path
         cache_dir = Path(cache_path)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        file_path = cache_dir / f"{self._index}_tickers_data_{self._start_date}_{self._end_date}.csv"
+        file_path = cache_dir / f"{self._index.upper()}_tickers_data_{self._start_date}_{self._end_date}.csv"
 
         # If cached file exists, load and return
         if load_from_cache and file_path.exists():
